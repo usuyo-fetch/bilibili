@@ -161,7 +161,7 @@ impl Endpoints {
         Self {
             api_base: Url::parse("https://api.bilibili.com/").expect("constant URL"),
             local_host: None,
-            policy: Policy::strict(),
+            policy: Policy::from_host(),
         }
     }
 
