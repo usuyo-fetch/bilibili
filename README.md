@@ -23,7 +23,7 @@ media/audio.m4s            音频流
 media/subtitle.<语言>.vtt  字幕（有登录时）
 ```
 
-视频流和音频流是两个文件，这里没有合并；合并交给宿主的转换步骤。`--want` 里有 `media:video` 时音频也一起写；只要 `media:audio` 时只写音频。拿不到的部分记进 `missing` 和 `missingReason`，不会写一个空文件。
+视频流和音频流是两个文件，这里没有合并；合并交给宿主的转换步骤。两个都存了时，`media[]` 里这两项带同一个 `group`（`cid:<这一 P 的 cid>`），宿主据此配对。`--want` 里有 `media:video` 时音频也一起写；只要 `media:audio` 时只写音频。拿不到的部分记进 `missing` 和 `missingReason`，不会写一个空文件。
 
 错误码：`-412`、`-352`（以及 HTTP 412、响应里带 `v_voucher`）回 `blocked`，`-101` 回 `login-required`，`-799`、`-509`、HTTP 429 回 `rate-limited`。
 

@@ -1062,6 +1062,9 @@ dependencies = [
 name = "usuyo-plugin-kit"
 version = "0.0.0"
 dependencies = [
+ "semver",
+ "serde",
+ "serde_json",
  "thiserror",
  "ureq",
  "url",

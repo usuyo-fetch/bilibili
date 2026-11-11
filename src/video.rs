@@ -12,7 +12,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use usuyo_plugin_kit::protocol::{
     Access, Author, CallFailure, Completeness, ErrorCode, Evidence, FetchOutput, ItemKind, Media,
-    MediaKind, OutputKind, RelPath, Rfc3339, TextFormat,
+    MediaGroup, MediaKind, OutputKind, RelPath, Rfc3339, TextFormat,
 };
 
 use crate::api::{ApiError, Bilibili, SITE, step};
@@ -282,6 +282,7 @@ pub fn fetch(
                             mime: Some("text/vtt".into()),
                             lang: Some(lang),
                             duration_sec: None,
+                            group: None,
                         });
                     }
                 }
@@ -475,6 +476,7 @@ fn to_vtt(cues: &[Cue]) -> String {
 }
 
 /// 取低画质的 DASH 流：视频和音频是两个文件，这里不合并（合并由宿主的转换步骤做）。
+/// 两个都存了时带同一个 `group`（`cid:<cid>`），宿主据此知道它们是同一段的画面和音轨。
 /// 视频没要时只写音频。返回写进 `meta.json` 的说明。
 fn streams(
     api: &Bilibili,
@@ -511,6 +513,11 @@ fn streams(
         "note": "video 和 audio 是分开的两个文件（DASH 流），要合并后才能带声音播放；这里没有合并",
     });
     let duration = (page.duration > 0.0).then_some(page.duration);
+    let group = if want_video {
+        Some(MediaGroup::try_from(format!("cid:{}", page.cid)).map_err(ApiError::Shape)?)
+    } else {
+        None
+    };
 
     if want_video {
         let stream = dash
@@ -537,6 +544,7 @@ fn streams(
             mime: Some("video/mp4".into()),
             lang: None,
             duration_sec: duration,
+            group: group.clone(),
         });
     }
 
@@ -562,6 +570,7 @@ fn streams(
         mime: Some("audio/mp4".into()),
         lang: None,
         duration_sec: duration,
+        group,
     });
     Ok(info)
 }

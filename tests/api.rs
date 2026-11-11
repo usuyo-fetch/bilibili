@@ -239,6 +239,13 @@ fn anonymous_fetch_writes_metadata_cover_and_both_streams() {
         ]
     );
     assert_eq!(out.media[0].duration_sec, Some(199.0));
+    // 同一段的画面和音轨带同一个 group：这一 P 的 cid
+    let groups: Vec<_> = out
+        .media
+        .iter()
+        .map(|m| m.group.as_ref().map(|g| g.as_str()))
+        .collect();
+    assert_eq!(groups, [Some("cid:279786"), Some("cid:279786")]);
     // 低画质：AVC 里 id 最小的（32，主地址不在允许的主机上，用备用地址），音频取 30216
     assert_eq!(
         std::fs::read(tmp.path().join("media/video.m4s")).unwrap(),
@@ -457,6 +464,8 @@ fn want_limits_what_is_fetched() {
         out.media.iter().map(|m| m.kind).collect::<Vec<_>>(),
         [MediaKind::Audio]
     );
+    // 只有音轨时没有要配的另一半
+    assert!(out.media[0].group.is_none());
     let later: Vec<_> = server.paths().split_off(before);
     assert!(!later.iter().any(|p| p.contains("video")), "{later:?}");
 
