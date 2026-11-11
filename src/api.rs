@@ -1,5 +1,5 @@
 //! B站的 HTTP 接口：只调不需要签名的接口。cookie 只发给 API 主机；
-//! 展开短链、下封面、字幕和视频流的请求一律不带 cookie。网络上来的每个字节都不可信。
+//! 展开短链、下封面和视频流的请求一律不带 cookie。网络上来的每个字节都不可信。
 //! 请求都经 `usuyo_plugin_kit::http`：每种请求只连自己那几台主机，只连公网地址，都不跟跳转。
 
 use std::io::{Read, Write};
@@ -414,12 +414,6 @@ impl Bilibili {
             .map_err(|e| self.out_of_time(transport(e)))?;
         check_status(&response)?;
         Ok(response)
-    }
-
-    /// 取一个小文件（字幕）。不带 cookie。
-    pub fn get_bytes(&self, url: &Url, limit: u64, timeout: Duration) -> Result<Vec<u8>, ApiError> {
-        let mut response = self.open_media(url, timeout)?;
-        read_limited(&mut response, limit).map_err(|e| self.out_of_time(e))
     }
 
     /// 把一个文件流式存到 `dest`，最多 `limit` 字节。不带 cookie。每秒向宿主报一次进度。

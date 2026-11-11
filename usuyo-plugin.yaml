@@ -3,7 +3,7 @@ protocol: 1
 id: usuyo-fetch/bilibili
 kind: fetch
 name: B站
-description: 列出我的收藏夹和稍后再看，按视频链接取元数据、封面、字幕和低画质音视频
+description: 列出我的收藏夹和稍后再看（用账号）；按视频链接取元数据、封面和低画质音视频（不用账号）
 version: 0.1.0
 license: MIT
 maintainers: [Fldicoahkiin]
@@ -20,11 +20,10 @@ sites:
     domains: [".bilibili.com"]
 capabilities:
   fetch:
-    access: session-api
-    login: optional
-    sites: [www.bilibili.com]
+    access: public-web
+    login: none
     timeout: 30m
-    outputs: [text, images, media:video, media:audio, subtitle, meta]
+    outputs: [text, images, media:video, media:audio, meta]
   list:
     access: session-api
     login: required

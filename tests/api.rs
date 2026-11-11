@@ -100,14 +100,11 @@ fn bilibili(req: &Request, base: &str) -> Response {
     match req.path.as_str() {
         "/x/web-interface/view" => view_response(req, base),
         "/x/player/playurl" => json_of("playurl.json", base),
-        "/x/player/wbi/v2" => json_of("player_v2.json", base),
         "/img/cover.jpg" => Response::bytes(b"COVER"),
         "/cdn/video-32.m4s" => Response::bytes(b"VIDEO32"),
         "/cdn/audio-64.m4s" => Response::bytes(b"AUDIO64"),
         "/cdn/big" => Response::bytes(&[7u8; 4096]),
         "/cdn/nolen" => Response::bytes(&[7u8; 4096]).header("X-No-Length", "1"),
-        "/sub/zh.json" => json_of("subtitle_zh.json", base),
-        "/sub/en.json" => json_of("subtitle_en.json", base),
         "/x/v3/fav/folder/created/list-all" => json_of("folders.json", base),
         "/x/v3/fav/resource/list" => {
             match (req.query["media_id"].as_str(), req.query["pn"].as_str()) {
@@ -256,10 +253,8 @@ fn anonymous_fetch_writes_metadata_cover_and_both_streams() {
         b"AUDIO64"
     );
 
-    // 没有 cookie：字幕拿不到，如实记下
-    assert_eq!(out.completeness, Completeness::Partial);
-    assert_eq!(out.missing, [OutputKind::Subtitle]);
-    assert!(out.missing_reason.as_deref().unwrap().contains("登录"));
+    assert_eq!(out.completeness, Completeness::Full);
+    assert!(out.missing.is_empty() && out.missing_reason.is_none());
     assert_eq!(out.evidence.access, Access::PublicWeb);
     assert_eq!(out.evidence.site, None);
 
@@ -311,7 +306,7 @@ fn anonymous_fetch_writes_metadata_cover_and_both_streams() {
 
     let requests = server.requests();
     assert!(requests.iter().all(|r| r.cookie().is_none()));
-    assert!(!server.paths().contains(&"/x/player/wbi/v2".to_owned()));
+    assert!(server.paths().iter().all(|p| p != "/x/player/wbi/v2"));
     let playurl = requests
         .iter()
         .find(|r| r.path == "/x/player/playurl")
@@ -325,67 +320,6 @@ fn anonymous_fetch_writes_metadata_cover_and_both_streams() {
         ),
         ("16", "170001")
     );
-}
-
-#[test]
-fn fetch_with_cookies_adds_subtitles_and_sends_cookies_only_to_the_api() {
-    let server = Server::start(bilibili);
-    let api = api_for(&server, Some(session()));
-    let tmp = tempfile::tempdir().unwrap();
-    let out = video::fetch(&api, &video_url(BV), tmp.path(), None).unwrap();
-
-    assert_eq!(
-        out.completeness,
-        Completeness::Full,
-        "{:?} {:?}",
-        out.missing,
-        out.missing_reason
-    );
-    assert!(out.missing.is_empty() && out.missing_reason.is_none());
-    assert_eq!(out.evidence.access, Access::SessionApi);
-    assert_eq!(out.evidence.site.as_deref(), Some(SITE));
-    let subs: Vec<_> = out
-        .media
-        .iter()
-        .filter(|m| m.kind == MediaKind::Subtitle)
-        .map(|m| (m.path.as_str(), m.lang.as_deref().unwrap()))
-        .collect();
-    assert_eq!(
-        subs,
-        [
-            ("media/subtitle.zh-CN.vtt", "zh-CN"),
-            ("media/subtitle.ai-en.vtt", "ai-en")
-        ]
-    );
-    assert_eq!(
-        std::fs::read_to_string(tmp.path().join("media/subtitle.zh-CN.vtt")).unwrap(),
-        "WEBVTT\n\n00:00:00.500 --> 00:00:02.250\n第一句\n\n01:01:01.000 --> 01:01:02.500\n含有 -> 箭头\n和空行\n\n"
-    );
-    assert_eq!(
-        files(tmp.path()),
-        [
-            "images/cover.jpg",
-            "media/audio.m4s",
-            "media/subtitle.ai-en.vtt",
-            "media/subtitle.zh-CN.vtt",
-            "media/video.m4s",
-            "meta.json",
-            "view.json"
-        ]
-    );
-
-    let expected = format!("SESSDATA={SESSDATA}; DedeUserID=12345");
-    for request in server.requests() {
-        let on_api = request.path.starts_with("/x/");
-        match request.cookie() {
-            Some(cookie) => {
-                assert!(on_api, "cookie sent to {}", request.path);
-                // bili_jct 是写操作用的，读不带
-                assert_eq!(cookie, expected, "{}", request.path);
-            }
-            None => assert!(!on_api, "no cookie on {}", request.path),
-        }
-    }
 }
 
 #[test]
@@ -477,7 +411,15 @@ fn want_limits_what_is_fetched() {
         Some(&[OutputKind::Html]),
     ));
     assert_eq!(bad.code, ErrorCode::InvalidArgs);
-    assert!(OUTPUTS.contains(&OutputKind::Subtitle));
+    // 字幕要登录才取得到，fetch 不给
+    let bad = failure(video::fetch(
+        &api,
+        &video_url(BV),
+        tmp.path(),
+        Some(&[OutputKind::Subtitle]),
+    ));
+    assert_eq!(bad.code, ErrorCode::InvalidArgs);
+    assert!(!OUTPUTS.contains(&OutputKind::Subtitle));
 }
 
 #[test]
@@ -522,83 +464,6 @@ fn optional_parts_that_fail_become_missing_not_errors() {
     assert_eq!(out.completeness, Completeness::Partial);
     assert_eq!(out.missing, [OutputKind::Video, OutputKind::Audio]);
     assert!(out.missing_reason.unwrap().contains("DASH"));
-}
-
-#[test]
-fn each_subtitle_is_handled_on_its_own() {
-    // 英文字幕 404：只跳过它，中文照写
-    let server = Server::start(|req, base| match req.path.as_str() {
-        "/sub/en.json" => Response::status(404),
-        _ => bilibili(req, base),
-    });
-    let tmp = tempfile::tempdir().unwrap();
-    let out = video::fetch(
-        &api_for(&server, Some(session())),
-        &video_url(BV),
-        tmp.path(),
-        Some(&[OutputKind::Subtitle]),
-    )
-    .unwrap();
-    assert_eq!(out.completeness, Completeness::Full);
-    assert_eq!(out.media.len(), 1);
-    assert_eq!(
-        files(tmp.path()),
-        ["media/subtitle.zh-CN.vtt", "meta.json", "view.json"]
-    );
-    let meta: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(tmp.path().join("meta.json")).unwrap()).unwrap();
-    assert!(
-        meta["subtitleSkipped"][0]
-            .as_str()
-            .unwrap()
-            .starts_with("ai-en")
-    );
-
-    // 两条都不可用：没有字幕文件，原因记进 missingReason
-    let server = Server::start(|req, base| match req.path.as_str() {
-        "/sub/en.json" | "/sub/zh.json" => Response::json("{}"),
-        _ => bilibili(req, base),
-    });
-    let tmp = tempfile::tempdir().unwrap();
-    let out = video::fetch(
-        &api_for(&server, Some(session())),
-        &video_url(BV),
-        tmp.path(),
-        Some(&[OutputKind::Subtitle]),
-    )
-    .unwrap();
-    assert_eq!(out.missing, [OutputKind::Subtitle]);
-    assert!(out.missing_reason.unwrap().contains("zh-CN"));
-    assert_eq!(files(tmp.path()), ["meta.json", "view.json"]);
-
-    // 第二条遇到风控：整次报 blocked
-    let server = Server::start(|req, base| match req.path.as_str() {
-        "/sub/en.json" => Response::status(412),
-        _ => bilibili(req, base),
-    });
-    let tmp = tempfile::tempdir().unwrap();
-    let f = failure(video::fetch(
-        &api_for(&server, Some(session())),
-        &video_url(BV),
-        tmp.path(),
-        Some(&[OutputKind::Subtitle]),
-    ));
-    assert_eq!(f.code, ErrorCode::Blocked);
-}
-
-#[test]
-fn risk_control_in_an_optional_step_stops_the_call() {
-    let server = Server::start(|req, base| match req.path.as_str() {
-        "/x/player/wbi/v2" => Response::json(r#"{"code":-412,"message":"blocked"}"#),
-        _ => bilibili(req, base),
-    });
-    let api = api_for(&server, Some(session()));
-    let tmp = tempfile::tempdir().unwrap();
-    let f = failure(video::fetch(&api, &video_url(BV), tmp.path(), None));
-    assert_eq!(
-        (f.code, f.site.as_deref()),
-        (ErrorCode::Blocked, Some(SITE))
-    );
 }
 
 #[test]
@@ -761,6 +626,34 @@ fn canonicalize_expands_short_links_without_cookies() {
     assert_eq!(
         canonicalize(&offline, "https://example.com/x").unwrap(),
         Canonicalized::NoMatch
+    );
+}
+
+#[test]
+fn list_sends_the_cookie_only_to_the_api_and_downloads_nothing() {
+    let server = Server::start(bilibili);
+    let api = api_for(&server, Some(session()));
+    favorites::sources(&api).unwrap();
+    favorites::list(&api, "bilibili:fav:100", None, None).unwrap();
+    favorites::list(&api, "bilibili:toview", None, None).unwrap();
+
+    let expected = format!("SESSDATA={SESSDATA}; DedeUserID=12345");
+    let requests = server.requests();
+    assert!(!requests.is_empty());
+    for request in &requests {
+        // 只有列表接口；每个请求都带 cookie，且 bili_jct 不在其中
+        assert!(request.path.starts_with("/x/"), "{}", request.path);
+        assert_eq!(
+            request.cookie(),
+            Some(expected.as_str()),
+            "{}",
+            request.path
+        );
+    }
+    assert!(
+        requests
+            .iter()
+            .all(|r| r.path != "/x/web-interface/view" && r.path != "/x/player/playurl")
     );
 }
 
@@ -1016,16 +909,16 @@ fn backup_addresses_are_capped() {
 
 #[test]
 fn slow_steps_stop_at_the_call_budget_and_keep_the_metadata() {
-    // 每条字幕要 2 秒。2.5 秒时第二条还没开始就不发；3.5 秒时第二条发出去后被总时限截断。
+    // 每个流要 2 秒。2.5 秒时音频还没开始就不发；3.5 秒时音频发出去后被总时限截断。
     // 两种都不等完，已经取到的交回去
     for budget in [2500, 3500] {
         let server = Server::start(|req, base| {
-            if req.path.starts_with("/sub/") {
+            if req.path.starts_with("/cdn/") {
                 std::thread::sleep(Duration::from_secs(2));
             }
             bilibili(req, base)
         });
-        let api = api_for(&server, Some(session())).with_budget(Duration::from_millis(budget));
+        let api = api_for(&server, None).with_budget(Duration::from_millis(budget));
         let tmp = tempfile::tempdir().unwrap();
         let started = std::time::Instant::now();
         let out = video::fetch(&api, &video_url(BV), tmp.path(), None).unwrap();

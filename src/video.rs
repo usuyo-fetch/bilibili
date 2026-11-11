@@ -1,8 +1,9 @@
-//! `fetch`：一个视频的元数据、封面、字幕，和按需要的低画质音视频流。
+//! `fetch`：一个视频的元数据、封面，和按需要的低画质音视频流。不带账号：
+//! 这里的请求都不带 cookie，也不读宿主交来的凭据。
 //!
 //! 输出目录里的文件名都是固定的，不用网络上来的名字：
 //! `view.json`（`view` 接口的原始响应）、`meta.json`、`images/cover.<ext>`、
-//! `media/video.m4s`、`media/audio.m4s`、`media/subtitle.<lang>.vtt`。
+//! `media/video.m4s`、`media/audio.m4s`。
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -15,25 +16,20 @@ use usuyo_plugin_kit::protocol::{
     MediaGroup, MediaKind, OutputKind, RelPath, Rfc3339, TextFormat,
 };
 
-use crate::api::{ApiError, Bilibili, SITE, step};
+use crate::api::{ApiError, Bilibili, step};
 use crate::canonical::{identity, locate};
 
 /// 本插件能给的输出，和清单里的 `outputs` 一致。
-pub const OUTPUTS: [OutputKind; 6] = [
+pub const OUTPUTS: [OutputKind; 5] = [
     OutputKind::Text,
     OutputKind::Images,
     OutputKind::Video,
     OutputKind::Audio,
-    OutputKind::Subtitle,
     OutputKind::Meta,
 ];
 
 const COVER_BYTES: u64 = 20 << 20;
 const COVER_TIMEOUT: Duration = Duration::from_secs(30);
-const SUBTITLE_BYTES: u64 = 4 << 20;
-const SUBTITLE_TIMEOUT: Duration = Duration::from_secs(30);
-const MAX_SUBTITLES: usize = 8;
-const MAX_CUES: usize = 20_000;
 const VIDEO_BYTES: u64 = 1 << 30;
 const VIDEO_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 const AUDIO_BYTES: u64 = 256 << 20;
@@ -104,37 +100,6 @@ struct DashStream {
     base_url: String,
     #[serde(rename = "backupUrl", default)]
     backup_url: Option<Vec<String>>,
-}
-
-#[derive(Deserialize)]
-struct PlayerInfo {
-    subtitle: Option<SubtitleList>,
-}
-
-#[derive(Deserialize)]
-struct SubtitleList {
-    #[serde(default)]
-    subtitles: Vec<SubtitleEntry>,
-}
-
-#[derive(Deserialize)]
-struct SubtitleEntry {
-    #[serde(default)]
-    lan: String,
-    #[serde(default)]
-    subtitle_url: String,
-}
-
-#[derive(Deserialize)]
-struct SubtitleFile {
-    body: Vec<Cue>,
-}
-
-#[derive(Deserialize)]
-struct Cue {
-    from: f64,
-    to: f64,
-    content: String,
 }
 
 pub fn fetch(
@@ -236,12 +201,8 @@ pub fn fetch(
         missing_reason: None,
         evidence: Evidence {
             fetched_at,
-            access: if api.session().is_some() {
-                Access::SessionApi
-            } else {
-                Access::PublicWeb
-            },
-            site: api.session().map(|_| SITE.to_owned()),
+            access: Access::PublicWeb,
+            site: None,
             upstream: None,
             status: Some(200),
         },
@@ -252,42 +213,6 @@ pub fn fetch(
         match cover(api, out, &view.pic) {
             Ok(path) => output.images.push(path),
             Err(e) => reasons.push(soft(e, "封面")?),
-        }
-    }
-
-    if wanted.contains(&OutputKind::Subtitle) {
-        if api.session().is_none() {
-            reasons.push("字幕需要登录 B站".into());
-        } else {
-            match subtitles(api, out, &view, page) {
-                Ok(Subtitles { found, skipped }) => {
-                    if !skipped.is_empty() {
-                        meta["subtitleSkipped"] = skipped.clone().into();
-                    }
-                    if found.is_empty() {
-                        reasons.push(if skipped.is_empty() {
-                            "这个视频没有可用的字幕".into()
-                        } else {
-                            format!("字幕：{}", skipped.join("；"))
-                        });
-                    }
-                    meta["subtitles"] = found
-                        .iter()
-                        .map(|(lang, path)| json!({"lang": lang, "file": path}))
-                        .collect();
-                    for (lang, path) in found {
-                        output.media.push(Media {
-                            path: rel(&path)?,
-                            kind: MediaKind::Subtitle,
-                            mime: Some("text/vtt".into()),
-                            lang: Some(lang),
-                            duration_sec: None,
-                            group: None,
-                        });
-                    }
-                }
-                Err(e) => reasons.push(soft(e, "字幕")?),
-            }
         }
     }
 
@@ -360,119 +285,6 @@ fn cover(api: &Bilibili, out: &Path, pic: &str) -> Result<RelPath, ApiError> {
     step("封面");
     api.download(&url, &out.join(&name), COVER_BYTES, COVER_TIMEOUT, "封面")?;
     RelPath::try_from(name).map_err(ApiError::Shape)
-}
-
-/// 字幕这一步的结果。
-struct Subtitles {
-    /// 写出的 `(语言, 相对路径)`。
-    found: Vec<(String, String)>,
-    /// 跳过的几条和原因。
-    skipped: Vec<String>,
-}
-
-/// 取字幕，转成 WebVTT。返回写出的 `(语言, 相对路径)` 和跳过的几条的原因。
-/// 每条字幕各自处理：一条不可用只跳过它，硬错误（网络、风控、登录过期）整个报出。
-/// 只在有登录时调用。
-fn subtitles(api: &Bilibili, out: &Path, view: &View, page: &Page) -> Result<Subtitles, ApiError> {
-    let aid = view.aid.to_string();
-    let cid = page.cid.to_string();
-    step("字幕列表");
-    let reply = api.get(
-        "x/player/wbi/v2",
-        &[
-            ("aid", aid.as_str()),
-            ("bvid", view.bvid.as_str()),
-            ("cid", cid.as_str()),
-        ],
-    )?;
-    let info: PlayerInfo = reply.data()?;
-    let entries = info.subtitle.map(|s| s.subtitles).unwrap_or_default();
-    let mut found: Vec<(String, String)> = Vec::new();
-    let mut skipped = Vec::new();
-    for entry in entries
-        .into_iter()
-        .filter(|e| !e.subtitle_url.is_empty())
-        .take(MAX_SUBTITLES)
-    {
-        let lang = lang_code(&entry.lan);
-        step(&format!("字幕 {lang}"));
-        let vtt = match subtitle_vtt(api, &entry) {
-            Ok(vtt) => vtt,
-            Err(e) if !e.is_hard() => {
-                skipped.push(format!("{lang}：{e}"));
-                continue;
-            }
-            Err(e) => return Err(e),
-        };
-        let mut name = format!("media/subtitle.{lang}.vtt");
-        let mut n = 2;
-        while found.iter().any(|(_, p)| *p == name) {
-            name = format!("media/subtitle.{lang}-{n}.vtt");
-            n += 1;
-        }
-        let io = |source| ApiError::Io {
-            path: name.clone(),
-            source,
-        };
-        std::fs::create_dir_all(out.join("media")).map_err(io)?;
-        std::fs::write(out.join(&name), vtt).map_err(io)?;
-        found.push((lang, name));
-    }
-    Ok(Subtitles { found, skipped })
-}
-
-fn subtitle_vtt(api: &Bilibili, entry: &SubtitleEntry) -> Result<String, ApiError> {
-    let url = api.endpoints().media_url(&entry.subtitle_url)?;
-    let body = api.get_bytes(&url, SUBTITLE_BYTES, SUBTITLE_TIMEOUT)?;
-    let file: SubtitleFile = serde_json::from_slice(&body)
-        .map_err(|e| ApiError::Shape(format!("subtitle file ({:?})", e.classify())))?;
-    Ok(to_vtt(&file.body))
-}
-
-/// 字幕语言码：只留字母、数字、连字符，别的整个换成 `und`。
-fn lang_code(lan: &str) -> String {
-    let ok = !lan.is_empty()
-        && lan.len() <= 16
-        && lan.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-');
-    if ok { lan.to_owned() } else { "und".into() }
-}
-
-fn vtt_time(seconds: f64) -> Option<String> {
-    if !seconds.is_finite() || !(0.0..1e7).contains(&seconds) {
-        return None;
-    }
-    let ms = (seconds * 1000.0).round() as u64;
-    Some(format!(
-        "{:02}:{:02}:{:02}.{:03}",
-        ms / 3_600_000,
-        ms / 60_000 % 60,
-        ms / 1000 % 60,
-        ms % 1000
-    ))
-}
-
-fn to_vtt(cues: &[Cue]) -> String {
-    let mut out = String::from("WEBVTT\n\n");
-    for cue in cues.iter().take(MAX_CUES) {
-        let (Some(from), Some(to)) = (vtt_time(cue.from), vtt_time(cue.to)) else {
-            continue;
-        };
-        // 空行会结束一个 cue，`-->` 会被当成时间行
-        let text = cue
-            .content
-            .replace('\r', "")
-            .replace("-->", "->")
-            .lines()
-            .map(str::trim)
-            .filter(|l| !l.is_empty())
-            .collect::<Vec<_>>()
-            .join("\n");
-        if text.is_empty() {
-            continue;
-        }
-        out.push_str(&format!("{from} --> {to}\n{text}\n\n"));
-    }
-    out
 }
 
 /// 取低画质的 DASH 流：视频和音频是两个文件，这里不合并（合并由宿主的转换步骤做）。

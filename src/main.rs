@@ -34,9 +34,9 @@ fn run(args: &[String]) -> anyhow::Result<u8> {
             emit(canonical::canonicalize(&anonymous(), &args[1]))
         }
         Some("fetch") => match parse_fetch(&args[1..]) {
-            Some((input, out, want)) => emit(
-                with_session().and_then(|api| video::fetch(&api, &input, &out, want.as_deref())),
-            ),
+            Some((input, out, want)) => {
+                emit(video::fetch(&anonymous(), &input, &out, want.as_deref()))
+            }
             None => usage(),
         },
         Some("sources") if args.len() == 1 => {

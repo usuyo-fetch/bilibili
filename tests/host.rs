@@ -99,6 +99,29 @@ fn a_bad_credentials_file_is_an_internal_error_without_its_content() {
     assert!(!out.to_string().contains("12345678"));
 }
 
+/// 凭据文件指向一个不存在的路径：读它的子命令会报凭据错误，fetch 不读，照常往下走。
+#[test]
+fn fetch_does_not_open_the_credentials_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let missing = tmp.path().join("no-such-credentials.json");
+    let env = [("USUYO_CREDENTIALS", missing.to_str().unwrap())];
+    let (code, out) = run(&["sources"], &env);
+    assert_eq!((code, &out["error"]["code"]), (1, &Value::from("internal")));
+
+    // 不是 B站的链接：不发请求，在读到凭据之前就能判定
+    let (code, out) = run(
+        &[
+            "fetch",
+            "https://example.com/x",
+            "--out",
+            tmp.path().to_str().unwrap(),
+        ],
+        &env,
+    );
+    assert_eq!(code, 1);
+    assert_eq!(out["error"]["code"], "unsupported-input");
+}
+
 #[test]
 fn bad_usage_exits_2() {
     for args in [
@@ -144,8 +167,9 @@ async fn the_manifest_loads_and_matches_bilibili_links() {
     let (fetch, list) = (caps.fetch.as_ref().unwrap(), caps.list.as_ref().unwrap());
     assert_eq!(
         (fetch.uses.access, fetch.uses.login),
-        (Access::SessionApi, Login::Optional)
+        (Access::PublicWeb, Login::None)
     );
+    assert!(fetch.uses.sites.is_empty());
     assert_eq!(
         (list.uses.access, list.uses.login),
         (Access::SessionApi, Login::Required)
