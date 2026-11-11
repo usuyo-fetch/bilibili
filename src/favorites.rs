@@ -237,7 +237,9 @@ fn favorites(
             "skipped {skipped} entries that are not available videos (deleted, hidden or not a video)"
         );
     }
-    let next = (data.has_more && !page_was_empty && !reached_since).then(|| (page + 1).to_string());
+    // 翻到 MAX_PAGE 就停：再往后的游标 page_number 不认
+    let next = (data.has_more && !page_was_empty && !reached_since && page < MAX_PAGE)
+        .then(|| (page + 1).to_string());
     Ok((items, next))
 }
 

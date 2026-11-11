@@ -25,6 +25,8 @@ const REFERER: &str = "https://www.bilibili.com/";
 /// API 响应上限。
 const API_BYTES: u64 = 8 << 20;
 const API_TIMEOUT: Duration = Duration::from_secs(20);
+/// 整次调用的总时限，比清单里的 `timeout: 30m` 短，留出交回已取到部分的时间。
+const CALL_BUDGET: Duration = Duration::from_secs(28 * 60);
 const SHORT_LINK_TIMEOUT: Duration = Duration::from_secs(8);
 const MAX_SHORT_LINK_HOPS: usize = 4;
 /// 封面、字幕、视频流只从这些域名的子域下载（和清单的 `network.hosts` 一致）。
@@ -55,6 +57,9 @@ pub enum ApiError {
     Refused(String),
     #[error("{0}")]
     Credentials(String),
+    /// 整次调用的时限到了。可选的那一步遇到它只记进 `missing`，已经取到的照样交出去。
+    #[error("the call's time budget is used up")]
+    OutOfTime,
     #[error("cannot write `{path}`: {source}")]
     Io {
         path: String,
@@ -73,7 +78,8 @@ impl ApiError {
             ApiError::Shape(_)
             | ApiError::TooLarge { .. }
             | ApiError::ForbiddenHost(_)
-            | ApiError::Refused(_) => false,
+            | ApiError::Refused(_)
+            | ApiError::OutOfTime => false,
         }
     }
 }
@@ -82,7 +88,9 @@ impl From<ApiError> for CallFailure {
     fn from(err: ApiError) -> CallFailure {
         let message = err.to_string();
         let mut failure = match &err {
-            ApiError::Network(_) => CallFailure::new(ErrorCode::Network, message),
+            ApiError::Network(_) | ApiError::OutOfTime => {
+                CallFailure::new(ErrorCode::Network, message)
+            }
             ApiError::Http {
                 status,
                 retry_after,
@@ -300,11 +308,42 @@ fn read_limited(response: &mut http::Response, limit: u64) -> Result<Vec<u8>, Ap
 pub struct Bilibili {
     endpoints: Endpoints,
     session: Option<Session>,
+    /// 整次调用的时限：每一步只能用到这里为止。
+    deadline: Instant,
 }
 
 impl Bilibili {
     pub fn new(endpoints: Endpoints, session: Option<Session>) -> Self {
-        Self { endpoints, session }
+        Self {
+            endpoints,
+            session,
+            deadline: Instant::now() + CALL_BUDGET,
+        }
+    }
+
+    /// 测试用：换一个短的总时限。
+    pub fn with_budget(self, budget: Duration) -> Self {
+        Self {
+            deadline: Instant::now() + budget,
+            ..self
+        }
+    }
+
+    /// 一步能用多久：它自己的上限和整次调用剩下的，取短的。剩不到一秒就不发了。
+    fn step_timeout(&self, step: Duration) -> Result<Duration, ApiError> {
+        let left = self.deadline.saturating_duration_since(Instant::now());
+        if left < Duration::from_secs(1) {
+            return Err(ApiError::OutOfTime);
+        }
+        Ok(step.min(left))
+    }
+
+    /// 时限一过，这一步的网络错误多半是被总时限截断的，按时限到了算。
+    fn out_of_time(&self, err: ApiError) -> ApiError {
+        match err {
+            ApiError::Network(_) if Instant::now() >= self.deadline => ApiError::OutOfTime,
+            other => other,
+        }
     }
 
     pub fn endpoints(&self) -> &Endpoints {
@@ -328,14 +367,14 @@ impl Bilibili {
             .get(&url)
             .header("Referer", REFERER)
             .header("Accept", "application/json")
-            .timeout(API_TIMEOUT);
+            .timeout(self.step_timeout(API_TIMEOUT)?);
         if let Some(session) = &self.session {
             let cookie = Cookie::new(session.cookie_header(), [self.endpoints.api_host()]);
             request = request.cookie(&cookie);
         }
-        let mut response = request.send().map_err(transport)?;
+        let mut response = request.send().map_err(|e| self.out_of_time(transport(e)))?;
         check_status(&response)?;
-        let raw = read_limited(&mut response, API_BYTES)?;
+        let raw = read_limited(&mut response, API_BYTES).map_err(|e| self.out_of_time(e))?;
         let wire: Wire = serde_json::from_slice(&raw).map_err(|e| {
             ApiError::Shape(format!(
                 "the body is not the expected JSON ({:?})",
@@ -370,9 +409,9 @@ impl Bilibili {
             .media_client()
             .get(url)
             .header("Referer", REFERER)
-            .timeout(timeout)
+            .timeout(self.step_timeout(timeout)?)
             .send()
-            .map_err(transport)?;
+            .map_err(|e| self.out_of_time(transport(e)))?;
         check_status(&response)?;
         Ok(response)
     }
@@ -380,7 +419,7 @@ impl Bilibili {
     /// 取一个小文件（字幕）。不带 cookie。
     pub fn get_bytes(&self, url: &Url, limit: u64, timeout: Duration) -> Result<Vec<u8>, ApiError> {
         let mut response = self.open_media(url, timeout)?;
-        read_limited(&mut response, limit)
+        read_limited(&mut response, limit).map_err(|e| self.out_of_time(e))
     }
 
     /// 把一个文件流式存到 `dest`，最多 `limit` 字节。不带 cookie。每秒向宿主报一次进度。
@@ -414,7 +453,7 @@ impl Bilibili {
             let _ = std::fs::remove_file(dest);
         }
         written.map_err(|e| match e {
-            CopyError::Api(e) => e,
+            CopyError::Api(e) => self.out_of_time(e),
             CopyError::Io(source) => io(source),
         })
     }
@@ -494,6 +533,17 @@ fn copy_limited(
     file.flush().map_err(CopyError::Io)?;
     progress(written, total, label);
     Ok(written)
+}
+
+/// 开始一步之前告诉宿主：一步一步慢下来时，宿主照样收得到 progress，不按「没进度」杀掉进程。
+pub(crate) fn step(label: &str) {
+    let event = PluginEvent::Progress {
+        done: None,
+        total: None,
+        unit: None,
+        message: Some(label.into()),
+    };
+    eprintln!("{}", event.stderr_line());
 }
 
 fn progress(done: u64, total: Option<u64>, label: &str) {

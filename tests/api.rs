@@ -111,7 +111,7 @@ fn bilibili(req: &Request, base: &str) -> Response {
         "/x/v3/fav/folder/created/list-all" => json_of("folders.json", base),
         "/x/v3/fav/resource/list" => {
             match (req.query["media_id"].as_str(), req.query["pn"].as_str()) {
-                ("100", "1") => json_of("fav_page1.json", base),
+                ("100", "1" | "10000") => json_of("fav_page1.json", base),
                 ("100", "2") => json_of("fav_page2.json", base),
                 _ => json_of("fav_empty.json", base),
             }
@@ -127,12 +127,19 @@ fn bilibili(req: &Request, base: &str) -> Response {
     }
 }
 
+/// 查过几次 `deep.hdslb.com`：只有备用地址的测试用这个名字。
+static DEEP_LOOKUPS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 /// 测试用的地址策略：只有 127.0.0.1 算公网，不查 DNS。
 /// `inner.hdslb.com` 在媒体主机名单里，但解析到内网地址。
 fn local_policy() -> Policy {
     Policy {
         lookup: |host, port| match host {
             "inner.hdslb.com" => Ok(vec![std::net::SocketAddr::from(([10, 0, 0, 1], port))]),
+            "deep.hdslb.com" => {
+                DEEP_LOOKUPS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(vec![std::net::SocketAddr::from(([10, 0, 0, 2], port))])
+            }
             _ => Err(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
                 "no DNS in tests",
@@ -824,6 +831,10 @@ fn list_pages_through_a_folder() {
     assert_eq!(page.next_cursor, None);
     assert_eq!(server.requests().last().unwrap().query["pn"], "2");
 
+    // 翻到最后一页就停，不交回一个自己不认的游标
+    let page = favorites::list(&api, "bilibili:fav:100", Some("10000"), None).unwrap();
+    assert_eq!(page.next_cursor, None);
+
     // --since：收藏时间早于它的不要，也不再翻页
     let since = Rfc3339::try_from("2026-10-26T07:34:00Z".to_owned()).unwrap();
     let page = favorites::list(&api, "bilibili:fav:100", None, Some(&since)).unwrap();
@@ -964,4 +975,63 @@ fn a_media_address_that_resolves_inside_falls_back_to_the_backup() {
         b"VIDEO32"
     );
     assert!(server.paths().contains(&"/cdn/video-32.m4s".to_owned()));
+}
+
+#[test]
+fn backup_addresses_are_capped() {
+    // 主地址不在名单里，备用地址给了一千个、个个解析到内网：只试前三个
+    let backups: Vec<String> = (0..1000)
+        .map(|i| format!("\"https://deep.hdslb.com/b{i}.m4s\""))
+        .collect();
+    let server = Server::start(move |req, base| match req.path.as_str() {
+        "/x/player/playurl" => Response::json(
+            fixture("playurl.json", base).replace(
+                "\"__BASE__/cdn/video-32.m4s\""
+                    .replace("__BASE__", base)
+                    .as_str(),
+                &backups.join(","),
+            ),
+        ),
+        _ => bilibili(req, base),
+    });
+    let api = api_for(&server, None);
+    let tmp = tempfile::tempdir().unwrap();
+    let out = video::fetch(&api, &video_url(BV), tmp.path(), Some(&[OutputKind::Video])).unwrap();
+    assert!(
+        out.missing.contains(&OutputKind::Video),
+        "{:?}",
+        out.missing
+    );
+    assert_eq!(DEEP_LOOKUPS.load(std::sync::atomic::Ordering::SeqCst), 3);
+}
+
+#[test]
+fn slow_steps_stop_at_the_call_budget_and_keep_the_metadata() {
+    // 每条字幕要 2 秒。2.5 秒时第二条还没开始就不发；3.5 秒时第二条发出去后被总时限截断。
+    // 两种都不等完，已经取到的交回去
+    for budget in [2500, 3500] {
+        let server = Server::start(|req, base| {
+            if req.path.starts_with("/sub/") {
+                std::thread::sleep(Duration::from_secs(2));
+            }
+            bilibili(req, base)
+        });
+        let api = api_for(&server, Some(session())).with_budget(Duration::from_millis(budget));
+        let tmp = tempfile::tempdir().unwrap();
+        let started = std::time::Instant::now();
+        let out = video::fetch(&api, &video_url(BV), tmp.path(), None).unwrap();
+        let took = started.elapsed();
+        assert!(
+            took < Duration::from_millis(budget + 1000),
+            "{budget}: {took:?}"
+        );
+        assert!(out.title.is_some() && !out.images.is_empty());
+        assert!(
+            out.missing.contains(&OutputKind::Audio),
+            "{budget}: {:?}",
+            out.missing
+        );
+        let reason = out.missing_reason.unwrap();
+        assert!(reason.contains("time budget"), "{budget}: {reason}");
+    }
 }

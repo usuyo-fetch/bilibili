@@ -15,7 +15,7 @@ use usuyo_plugin_kit::protocol::{
     MediaKind, OutputKind, RelPath, Rfc3339, TextFormat,
 };
 
-use crate::api::{ApiError, Bilibili, SITE};
+use crate::api::{ApiError, Bilibili, SITE, step};
 use crate::canonical::{identity, locate};
 
 /// 本插件能给的输出，和清单里的 `outputs` 一致。
@@ -38,6 +38,8 @@ const VIDEO_BYTES: u64 = 1 << 30;
 const VIDEO_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 const AUDIO_BYTES: u64 = 256 << 20;
 const AUDIO_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+/// 每一路最多试几个备用地址：接口给再多也不变成一串请求。
+const MAX_BACKUPS: usize = 3;
 /// playurl 里视频的编码 id：7 是 AVC，哪里都能解。
 const CODEC_AVC: u64 = 7;
 
@@ -160,6 +162,7 @@ pub fn fetch(
     let identity = identity(&video)?;
 
     let fetched_at = Rfc3339::from_timestamp(jiff::Timestamp::now());
+    step("视频信息");
     let reply = api.get("x/web-interface/view", &[("bvid", video.bvid.as_str())])?;
     let view: View = reply.data()?;
     if view.bvid != video.bvid {
@@ -353,6 +356,7 @@ fn cover(api: &Bilibili, out: &Path, pic: &str) -> Result<RelPath, ApiError> {
         .filter(|e| matches!(e.as_str(), "jpg" | "jpeg" | "png" | "webp" | "gif" | "avif"))
         .unwrap_or_else(|| "jpg".into());
     let name = format!("images/cover.{ext}");
+    step("封面");
     api.download(&url, &out.join(&name), COVER_BYTES, COVER_TIMEOUT, "封面")?;
     RelPath::try_from(name).map_err(ApiError::Shape)
 }
@@ -371,6 +375,7 @@ struct Subtitles {
 fn subtitles(api: &Bilibili, out: &Path, view: &View, page: &Page) -> Result<Subtitles, ApiError> {
     let aid = view.aid.to_string();
     let cid = page.cid.to_string();
+    step("字幕列表");
     let reply = api.get(
         "x/player/wbi/v2",
         &[
@@ -389,6 +394,7 @@ fn subtitles(api: &Bilibili, out: &Path, view: &View, page: &Page) -> Result<Sub
         .take(MAX_SUBTITLES)
     {
         let lang = lang_code(&entry.lan);
+        step(&format!("字幕 {lang}"));
         let vtt = match subtitle_vtt(api, &entry) {
             Ok(vtt) => vtt,
             Err(e) if !e.is_hard() => {
@@ -480,6 +486,7 @@ fn streams(
 ) -> Result<Value, ApiError> {
     let aid = view.aid.to_string();
     let cid = page.cid.to_string();
+    step("音视频流地址");
     let reply = api.get(
         "x/player/playurl",
         &[
@@ -570,17 +577,21 @@ fn fetch_stream(
     label: &str,
 ) -> Result<(), ApiError> {
     let mut first_error = None;
-    let candidates = std::iter::once(&stream.base_url).chain(stream.backup_url.iter().flatten());
+    let backups = stream.backup_url.iter().flatten().take(MAX_BACKUPS);
+    let candidates = std::iter::once(&stream.base_url).chain(backups);
     for raw in candidates {
         match api.endpoints().media_url(raw) {
-            Ok(url) => match api.download(&url, &out.join(name), limit, timeout, label) {
-                Ok(_) => return Ok(()),
-                // 地址解析到内网之类、根本没连出去的，换下一个
-                Err(e @ ApiError::Refused(_)) => {
-                    first_error.get_or_insert(e);
+            Ok(url) => {
+                step(label);
+                match api.download(&url, &out.join(name), limit, timeout, label) {
+                    Ok(_) => return Ok(()),
+                    // 地址解析到内网之类、根本没连出去的，换下一个
+                    Err(e @ ApiError::Refused(_)) => {
+                        first_error.get_or_insert(e);
+                    }
+                    Err(e) => return Err(e),
                 }
-                Err(e) => return Err(e),
-            },
+            }
             Err(e) => {
                 first_error.get_or_insert(e);
             }
