@@ -1,0 +1,44 @@
+# B站获取插件：列出你自己的收藏夹和稍后再看，按链接取单条，用于个人备份和离线阅读。
+protocol: 1
+id: usuyo-fetch/bilibili
+kind: fetch
+name: B站
+description: 列出我的收藏夹和稍后再看，按视频链接取元数据、封面、字幕和低画质音视频
+version: 0.1.0
+license: MIT
+maintainers: [Fldicoahkiin]
+platforms: [bilibili]
+match: ["www.bilibili.com/video/*", "m.bilibili.com/video/*", "b23.tv/*"]
+access: session-api
+login: required
+sites:
+  - site: www.bilibili.com
+    name: B站
+    credential: cookies
+    loginUrl: https://passport.bilibili.com/login
+    cookies: [SESSDATA]
+    domains: [".bilibili.com"]
+capabilities:
+  fetch:
+    access: session-api
+    login: optional
+    sites: [www.bilibili.com]
+    timeout: 30m
+    outputs: [text, images, media:video, media:audio, subtitle, meta]
+  list:
+    access: session-api
+    login: required
+    sites: [www.bilibili.com]
+    order: newest-first
+    sources:
+      - {source: "bilibili:toview", title: 稍后再看, action: favorite}
+pacing:
+  bilibili: {batch: true, interval: 5s, daily: 500}
+permissions:
+  fs:
+    write: ["${OUT}"]
+  network:
+    mode: allowlist
+    hosts: ["api.bilibili.com", "b23.tv", "*.bilivideo.com", "*.bilivideo.cn", "*.hdslb.com"]
+run:
+  command: ["${PLUGIN_DIR}/usuyo-fetch-bilibili"]

@@ -1,0 +1,88 @@
+{
+ "code": 0,
+ "message": "0",
+ "ttl": 1,
+ "data": {
+  "info": {
+   "id": 100,
+   "title": "默认收藏夹"
+  },
+  "medias": [
+   {
+    "id": 170001,
+    "type": 2,
+    "title": "第一条",
+    "cover": "x",
+    "intro": "i",
+    "page": 1,
+    "duration": 10,
+    "upper": {
+     "mid": 122541,
+     "name": "冰封.虾子"
+    },
+    "attr": 0,
+    "ctime": 1497380562,
+    "pubtime": 1320850533,
+    "fav_time": 1793000300,
+    "bv_id": "BV17x411w7KC",
+    "bvid": "BV17x411w7KC"
+   },
+   {
+    "id": 2,
+    "type": 2,
+    "title": "已失效视频",
+    "cover": "x",
+    "intro": "",
+    "page": 1,
+    "duration": 0,
+    "upper": {
+     "mid": 0,
+     "name": ""
+    },
+    "attr": 9,
+    "ctime": 0,
+    "pubtime": 0,
+    "fav_time": 1793000200,
+    "bvid": "BV1aaaaaaaaa"
+   },
+   {
+    "id": 3,
+    "type": 12,
+    "title": "音频",
+    "cover": "x",
+    "intro": "",
+    "page": 1,
+    "duration": 0,
+    "upper": {
+     "mid": 5,
+     "name": "u"
+    },
+    "attr": 0,
+    "ctime": 0,
+    "pubtime": 0,
+    "fav_time": 1793000100,
+    "bvid": ""
+   },
+   {
+    "id": 4,
+    "type": 2,
+    "title": "第二条",
+    "cover": "x",
+    "intro": "",
+    "page": 1,
+    "duration": 5,
+    "upper": {
+     "mid": 7,
+     "name": "另一个"
+    },
+    "attr": 4,
+    "ctime": 0,
+    "pubtime": 1700000000,
+    "fav_time": 1793000000,
+    "bvid": "BV1aaaaaaaa1"
+   }
+  ],
+  "has_more": true,
+  "ttl": 1
+ }
+}

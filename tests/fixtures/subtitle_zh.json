@@ -1,0 +1,22 @@
+{
+ "font_size": 0.4,
+ "body": [
+  {
+   "from": 0.5,
+   "to": 2.25,
+   "location": 2,
+   "content": "第一句"
+  },
+  {
+   "from": 3661.0,
+   "to": 3662.5,
+   "location": 2,
+   "content": "含有 --> 箭头\n\n和空行"
+  },
+  {
+   "from": -1,
+   "to": 2,
+   "content": "负时间会被丢掉"
+  }
+ ]
+}

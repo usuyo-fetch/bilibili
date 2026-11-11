@@ -1,0 +1,31 @@
+{
+ "code": 0,
+ "message": "0",
+ "ttl": 1,
+ "data": {
+  "info": {
+   "id": 100
+  },
+  "medias": [
+   {
+    "id": 5,
+    "type": 2,
+    "title": "第三条",
+    "cover": "x",
+    "intro": "",
+    "page": 1,
+    "duration": 5,
+    "upper": {
+     "mid": 7,
+     "name": "另一个"
+    },
+    "attr": 0,
+    "ctime": 0,
+    "pubtime": 1700000001,
+    "fav_time": 1792990000,
+    "bvid": "BV1aaaaaaaa2"
+   }
+  ],
+  "has_more": false
+ }
+}
