@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use serde::Deserialize;
 use serde_json::{Value, json};
-use usuyo_plugin::protocol::{
+use usuyo_plugin_kit::protocol::{
     Access, Author, CallFailure, Completeness, ErrorCode, Evidence, FetchOutput, ItemKind, Media,
     MediaKind, OutputKind, RelPath, Rfc3339, TextFormat,
 };
@@ -559,7 +559,7 @@ fn streams(
     Ok(info)
 }
 
-/// 主地址和备用地址里第一个在允许主机上的，下载到 `name`。
+/// 主地址和备用地址里第一个在允许主机上、连之前的检查也过了的，下载到 `name`。
 fn fetch_stream(
     api: &Bilibili,
     out: &Path,
@@ -573,10 +573,14 @@ fn fetch_stream(
     let candidates = std::iter::once(&stream.base_url).chain(stream.backup_url.iter().flatten());
     for raw in candidates {
         match api.endpoints().media_url(raw) {
-            Ok(url) => {
-                api.download(&url, &out.join(name), limit, timeout, label)?;
-                return Ok(());
-            }
+            Ok(url) => match api.download(&url, &out.join(name), limit, timeout, label) {
+                Ok(_) => return Ok(()),
+                // 地址解析到内网之类、根本没连出去的，换下一个
+                Err(e @ ApiError::Refused(_)) => {
+                    first_error.get_or_insert(e);
+                }
+                Err(e) => return Err(e),
+            },
             Err(e) => {
                 first_error.get_or_insert(e);
             }

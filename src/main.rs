@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 use usuyo_fetch_bilibili::api::{ApiError, Bilibili, Endpoints, SITE};
 use usuyo_fetch_bilibili::session::Session;
 use usuyo_fetch_bilibili::{canonical, favorites, video};
-use usuyo_plugin::protocol::{CallFailure, Envelope, OutputKind, Rfc3339};
+use usuyo_plugin_kit::protocol::{CallFailure, Envelope, OutputKind, Rfc3339};
 
 const USAGE: &str = "usage: usuyo-fetch-bilibili canonicalize <url> | fetch <url> --out <dir> [--want a,b] | sources | list <source> [--cursor <c>] [--since <time>] | health [--probe]";
 

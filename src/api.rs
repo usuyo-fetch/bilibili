@@ -1,5 +1,6 @@
 //! B站的 HTTP 接口：只调不需要签名的接口。cookie 只发给 API 主机；
 //! 展开短链、下封面、字幕和视频流的请求一律不带 cookie。网络上来的每个字节都不可信。
+//! 请求都经 `usuyo_plugin_kit::http`：每种请求只连自己那几台主机，只连公网地址，都不跟跳转。
 
 use std::io::{Read, Write};
 use std::path::Path;
@@ -9,7 +10,8 @@ use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use url::Url;
-use usuyo_plugin::protocol::{CallFailure, ErrorCode, NotFoundReason, PluginEvent};
+use usuyo_plugin_kit::http::{self, Client, Cookie, Hosts, Policy};
+use usuyo_plugin_kit::protocol::{CallFailure, ErrorCode, NotFoundReason, PluginEvent};
 
 use crate::ids::is_video_host;
 use crate::session::Session;
@@ -23,11 +25,11 @@ const REFERER: &str = "https://www.bilibili.com/";
 /// API 响应上限。
 const API_BYTES: u64 = 8 << 20;
 const API_TIMEOUT: Duration = Duration::from_secs(20);
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const SHORT_LINK_TIMEOUT: Duration = Duration::from_secs(8);
 const MAX_SHORT_LINK_HOPS: usize = 4;
-/// 封面、字幕、视频流可以放在这些域名下（和清单的 `network.hosts` 一致）。
-const MEDIA_HOST_SUFFIXES: [&str; 3] = ["bilivideo.com", "bilivideo.cn", "hdslb.com"];
+/// 封面、字幕、视频流只从这些域名的子域下载（和清单的 `network.hosts` 一致）。
+const MEDIA_HOST_SUFFIXES: [&str; 3] = [".bilivideo.com", ".bilivideo.cn", ".hdslb.com"];
+const SHORT_LINK_HOST: &str = "b23.tv";
 /// 错误信息里照抄服务器 `message` 的长度上限。
 const MESSAGE_CHARS: usize = 120;
 
@@ -48,6 +50,9 @@ pub enum ApiError {
     TooLarge { limit: u64 },
     #[error("the host `{0}` is not one of the allowed media hosts")]
     ForbiddenHost(String),
+    /// 连之前的检查没过：主机不在这种请求的名单里，或地址不是公网。
+    #[error("refused to connect: {0}")]
+    Refused(String),
     #[error("{0}")]
     Credentials(String),
     #[error("cannot write `{path}`: {source}")]
@@ -65,7 +70,10 @@ impl ApiError {
             ApiError::Network(_) | ApiError::Credentials(_) | ApiError::Io { .. } => true,
             ApiError::Http { status, .. } => !matches!(status, 404 | 410),
             ApiError::Code { code, .. } => matches!(code, -412 | -352 | -101 | -509 | -799),
-            ApiError::Shape(_) | ApiError::TooLarge { .. } | ApiError::ForbiddenHost(_) => false,
+            ApiError::Shape(_)
+            | ApiError::TooLarge { .. }
+            | ApiError::ForbiddenHost(_)
+            | ApiError::Refused(_) => false,
         }
     }
 }
@@ -99,9 +107,10 @@ impl From<ApiError> for CallFailure {
                 -509 | -799 => CallFailure::new(ErrorCode::RateLimited, message),
                 _ => CallFailure::new(ErrorCode::UpstreamChanged, message),
             },
-            ApiError::Shape(_) | ApiError::TooLarge { .. } | ApiError::ForbiddenHost(_) => {
-                CallFailure::new(ErrorCode::UpstreamChanged, message)
-            }
+            ApiError::Shape(_)
+            | ApiError::TooLarge { .. }
+            | ApiError::ForbiddenHost(_)
+            | ApiError::Refused(_) => CallFailure::new(ErrorCode::UpstreamChanged, message),
             ApiError::Credentials(_) | ApiError::Io { .. } => {
                 CallFailure::new(ErrorCode::Internal, message)
             }
@@ -138,12 +147,13 @@ fn not_found(message: String, reason: NotFoundReason) -> CallFailure {
     }
 }
 
-/// 要连的主机。正式运行用 `production`；测试把它指到本机的假服务器。
+/// 要连的主机和地址策略。正式运行用 `production`；测试把它指到本机的假服务器。
 #[derive(Debug, Clone)]
 pub struct Endpoints {
     api_base: Url,
     /// 测试用的本机主机：算短链主机，也算允许的媒体主机，媒体链接不升级成 https。
     local_host: Option<String>,
+    policy: Policy,
 }
 
 impl Endpoints {
@@ -151,28 +161,53 @@ impl Endpoints {
         Self {
             api_base: Url::parse("https://api.bilibili.com/").expect("constant URL"),
             local_host: None,
+            policy: Policy::strict(),
         }
     }
 
-    /// 测试用：`base` 是 `http://127.0.0.1:<端口>`。
-    pub fn local(base: &str) -> Self {
+    /// 测试用：`base` 是 `http://127.0.0.1:<端口>`，`policy` 让这个本机地址算公网。
+    pub fn local(base: &str, policy: Policy) -> Self {
         let api_base = Url::parse(base).expect("local base URL");
         let local_host = api_base.host_str().map(str::to_owned);
         Self {
             api_base,
             local_host,
+            policy,
         }
     }
 
     pub fn is_short_link_host(&self, host: &str) -> bool {
-        host == "b23.tv" || self.local_host.as_deref() == Some(host)
+        host == SHORT_LINK_HOST || self.local_host.as_deref() == Some(host)
     }
 
     fn is_media_host(&self, host: &str) -> bool {
         self.local_host.as_deref() == Some(host)
             || MEDIA_HOST_SUFFIXES
                 .iter()
-                .any(|s| host == *s || host.strip_suffix(s).is_some_and(|p| p.ends_with('.')))
+                .any(|s| host.len() > s.len() && host.ends_with(s))
+    }
+
+    fn api_host(&self) -> &str {
+        self.api_base.host_str().unwrap_or_default()
+    }
+
+    fn client(&self, hosts: &[&str]) -> Client {
+        let local = self.local_host.as_deref();
+        Client::new(USER_AGENT, Hosts::only(hosts.iter().copied().chain(local)))
+            .with_policy(self.policy)
+    }
+
+    /// 接口只连 API 主机。
+    fn api_client(&self) -> Client {
+        self.client(&[self.api_host()])
+    }
+
+    fn short_link_client(&self) -> Client {
+        self.client(&[SHORT_LINK_HOST])
+    }
+
+    fn media_client(&self) -> Client {
+        self.client(&MEDIA_HOST_SUFFIXES)
     }
 
     /// 接口给的媒体地址：补 scheme、升级成 https、核对主机。
@@ -235,34 +270,22 @@ struct Wire {
     data: Value,
 }
 
-fn agent(timeout: Duration) -> ureq::Agent {
-    ureq::Agent::config_builder()
-        .timeout_global(Some(timeout))
-        .timeout_connect(Some(CONNECT_TIMEOUT))
-        // 不跟随重定向：接口和 CDN 都不该重定向，短链的跳转自己一跳一跳读
-        .max_redirects(0)
-        .max_redirects_will_error(false)
-        .user_agent(USER_AGENT)
-        .http_status_as_error(false)
-        .build()
-        .into()
+// 请求都不跟随重定向：接口和 CDN 都不该重定向，短链的跳转自己一跳一跳读
+fn transport(e: http::Error) -> ApiError {
+    match e {
+        http::Error::TooLarge(limit) => ApiError::TooLarge { limit },
+        e if e.is_refusal() => ApiError::Refused(e.to_string()),
+        e => ApiError::Network(e.to_string()),
+    }
 }
 
-type Response = ureq::http::Response<ureq::Body>;
-
-fn network(e: ureq::Error) -> ApiError {
-    ApiError::Network(e.to_string())
-}
-
-fn check_status(response: &Response) -> Result<(), ApiError> {
-    let status = response.status().as_u16();
+fn check_status(response: &http::Response) -> Result<(), ApiError> {
+    let status = response.status();
     if (200..300).contains(&status) {
         return Ok(());
     }
     let retry_after = response
-        .headers()
-        .get("retry-after")
-        .and_then(|v| v.to_str().ok())
+        .header("retry-after")
         .and_then(|v| v.trim().parse().ok());
     Err(ApiError::Http {
         status,
@@ -270,16 +293,8 @@ fn check_status(response: &Response) -> Result<(), ApiError> {
     })
 }
 
-fn read_limited(response: &mut Response, limit: u64) -> Result<Vec<u8>, ApiError> {
-    response
-        .body_mut()
-        .with_config()
-        .limit(limit)
-        .read_to_vec()
-        .map_err(|e| match e {
-            ureq::Error::BodyExceedsLimit(_) => ApiError::TooLarge { limit },
-            other => network(other),
-        })
+fn read_limited(response: &mut http::Response, limit: u64) -> Result<Vec<u8>, ApiError> {
+    response.read_to_vec(limit).map_err(transport)
 }
 
 pub struct Bilibili {
@@ -308,14 +323,17 @@ impl Bilibili {
             .join(path)
             .map_err(|e| ApiError::Shape(format!("bad endpoint `{path}`: {e}")))?;
         url.query_pairs_mut().extend_pairs(query);
-        let mut request = agent(API_TIMEOUT)
-            .get(url.as_str())
+        let client = self.endpoints.api_client();
+        let mut request = client
+            .get(&url)
             .header("Referer", REFERER)
-            .header("Accept", "application/json");
+            .header("Accept", "application/json")
+            .timeout(API_TIMEOUT);
         if let Some(session) = &self.session {
-            request = request.header("Cookie", session.cookie_header());
+            let cookie = Cookie::new(session.cookie_header(), [self.endpoints.api_host()]);
+            request = request.cookie(&cookie);
         }
-        let mut response = request.call().map_err(network)?;
+        let mut response = request.send().map_err(transport)?;
         check_status(&response)?;
         let raw = read_limited(&mut response, API_BYTES)?;
         let wire: Wire = serde_json::from_slice(&raw).map_err(|e| {
@@ -346,12 +364,15 @@ impl Bilibili {
         })
     }
 
-    fn open_media(&self, url: &Url, timeout: Duration) -> Result<Response, ApiError> {
-        let response = agent(timeout)
-            .get(url.as_str())
+    fn open_media(&self, url: &Url, timeout: Duration) -> Result<http::Response, ApiError> {
+        let response = self
+            .endpoints
+            .media_client()
+            .get(url)
             .header("Referer", REFERER)
-            .call()
-            .map_err(network)?;
+            .timeout(timeout)
+            .send()
+            .map_err(transport)?;
         check_status(&response)?;
         Ok(response)
     }
@@ -371,11 +392,9 @@ impl Bilibili {
         timeout: Duration,
         label: &str,
     ) -> Result<u64, ApiError> {
-        let mut response = self.open_media(url, timeout)?;
+        let response = self.open_media(url, timeout)?;
         let total = response
-            .headers()
-            .get("content-length")
-            .and_then(|v| v.to_str().ok())
+            .header("content-length")
             .and_then(|v| v.parse::<u64>().ok());
         if total.is_some_and(|t| t > limit) {
             return Err(ApiError::TooLarge { limit });
@@ -388,7 +407,7 @@ impl Bilibili {
             std::fs::create_dir_all(parent).map_err(io)?;
         }
         let file = std::fs::File::create_new(dest).map_err(io)?;
-        let written = copy_limited(&mut response, file, limit, total, label);
+        let written = copy_limited(response.into_reader(limit), file, limit, total, label);
         if written.is_err() {
             // 写了一半的文件不留在输出目录里：宿主会把没被引用的文件也原样收下。
             // 清理失败不改变这次调用的结果，调用失败时整个目录本来就会被丢掉。
@@ -411,19 +430,20 @@ impl Bilibili {
             if is_video_host(&host) || !self.endpoints.is_short_link_host(&host) {
                 return Ok(current);
             }
-            let response = agent(SHORT_LINK_TIMEOUT)
-                .get(current.as_str())
-                .call()
-                .map_err(network)?;
-            let status = response.status().as_u16();
+            let response = self
+                .endpoints
+                .short_link_client()
+                .get(&current)
+                .timeout(SHORT_LINK_TIMEOUT)
+                .send()
+                .map_err(transport)?;
+            let status = response.status();
             if !(300..400).contains(&status) {
                 check_status(&response)?;
                 return Ok(current);
             }
             let location = response
-                .headers()
-                .get("location")
-                .and_then(|v| v.to_str().ok())
+                .header("location")
                 .ok_or_else(|| ApiError::Shape("a redirect without `Location`".into()))?;
             let next = current
                 .join(location)
@@ -442,29 +462,29 @@ enum CopyError {
     Io(std::io::Error),
 }
 
-/// 把响应体流式写进文件，最多 `limit` 字节，每秒报一次进度。
+/// 把响应体流式写进文件，`reader` 读出超过 `limit` 字节时报错，每秒报一次进度。
 fn copy_limited(
-    response: &mut Response,
+    mut reader: impl Read,
     mut file: std::fs::File,
     limit: u64,
     total: Option<u64>,
     label: &str,
 ) -> Result<u64, CopyError> {
-    let mut reader = response.body_mut().with_config().limit(limit + 1).reader();
     let mut buffer = vec![0u8; 64 << 10];
     let mut written = 0u64;
     let mut last_report = Instant::now();
     loop {
-        let n = reader
-            .read(&mut buffer)
-            .map_err(|e| CopyError::Api(ApiError::Network(e.to_string())))?;
+        let n = reader.read(&mut buffer).map_err(|e| {
+            CopyError::Api(if e.kind() == std::io::ErrorKind::FileTooLarge {
+                ApiError::TooLarge { limit }
+            } else {
+                ApiError::Network(e.to_string())
+            })
+        })?;
         if n == 0 {
             break;
         }
         written += n as u64;
-        if written > limit {
-            return Err(CopyError::Api(ApiError::TooLarge { limit }));
-        }
         file.write_all(&buffer[..n]).map_err(CopyError::Io)?;
         if last_report.elapsed() >= Duration::from_secs(1) {
             progress(written, total, label);

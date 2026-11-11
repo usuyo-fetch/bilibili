@@ -2,7 +2,7 @@
 //! 不调需要签名的接口。
 
 use serde::Deserialize;
-use usuyo_plugin::protocol::{
+use usuyo_plugin_kit::protocol::{
     Access, Author, CallFailure, ErrorCode, Evidence, Identity, ListAction, ListItem, ListPage,
     PlatformId, Rfc3339, SourceInfo, SourcesOutput,
 };

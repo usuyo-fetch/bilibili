@@ -3,6 +3,7 @@
 
 mod support;
 
+use std::net::IpAddr;
 use std::path::Path;
 use std::time::Duration;
 
@@ -16,6 +17,7 @@ use usuyo_plugin::protocol::{
     Access, CallFailure, Canonicalized, Completeness, ErrorCode, Identity, ListAction, MediaKind,
     NotFoundReason, OutputKind, Rfc3339,
 };
+use usuyo_plugin_kit::http::Policy;
 
 const BV: &str = "BV17x411w7KC";
 const SESSDATA: &str = "sessvalue1";
@@ -125,8 +127,23 @@ fn bilibili(req: &Request, base: &str) -> Response {
     }
 }
 
+/// 测试用的地址策略：只有 127.0.0.1 算公网，不查 DNS。
+/// `inner.hdslb.com` 在媒体主机名单里，但解析到内网地址。
+fn local_policy() -> Policy {
+    Policy {
+        lookup: |host, port| match host {
+            "inner.hdslb.com" => Ok(vec![std::net::SocketAddr::from(([10, 0, 0, 1], port))]),
+            _ => Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "no DNS in tests",
+            )),
+        },
+        public: |ip| ip == IpAddr::from([127, 0, 0, 1]),
+    }
+}
+
 fn api_for(server: &Server, session: Option<Session>) -> Bilibili {
-    Bilibili::new(Endpoints::local(&server.base), session)
+    Bilibili::new(Endpoints::local(&server.base, local_policy()), session)
 }
 
 fn failure<T: std::fmt::Debug>(result: Result<T, CallFailure>) -> CallFailure {
@@ -717,7 +734,7 @@ fn canonicalize_expands_short_links_without_cookies() {
     assert_eq!(server.paths().len(), before);
 
     // 离线
-    let offline = Bilibili::new(Endpoints::local("http://127.0.0.1:1"), None);
+    let offline = Bilibili::new(Endpoints::local("http://127.0.0.1:1", local_policy()), None);
     assert_eq!(
         failure(canonicalize(&offline, "http://127.0.0.1:1/abc")).code,
         ErrorCode::Network
@@ -874,4 +891,75 @@ fn list_errors_from_the_site_are_mapped() {
     assert_eq!(f.code, ErrorCode::LoginRequired);
     let f = failure(favorites::sources(&api));
     assert_eq!(f.code, ErrorCode::LoginRequired);
+}
+
+#[test]
+fn redirects_off_the_allowed_hosts_are_not_followed() {
+    // 允许的主机跳去名单外的主机、跳去回环地址：媒体下载和短链展开都不跟过去
+    let elsewhere = Server::start(|_, _| Response::bytes(b"ELSEWHERE"));
+    let port = elsewhere.base.rsplit(':').next().unwrap().to_owned();
+    let targets = [
+        format!("http://localhost:{port}/c.jpg"),
+        format!("http://127.0.0.2:{port}/c.jpg"),
+    ];
+    let server = Server::start(move |req, _| match req.path.as_str() {
+        "/cdn/to-0" | "/s-0" => Response::redirect(&targets[0]),
+        "/cdn/to-1" | "/s-1" => Response::redirect(&targets[1]),
+        _ => Response::status(404),
+    });
+    let api = api_for(&server, Some(session()));
+    let tmp = tempfile::tempdir().unwrap();
+    for i in 0..2 {
+        let url = url::Url::parse(&format!("{}/cdn/to-{i}", server.base)).unwrap();
+        let dest = tmp.path().join(format!("{i}.jpg"));
+        let err = api
+            .download(&url, &dest, 1024, Duration::from_secs(5), "t")
+            .unwrap_err();
+        assert!(matches!(err, ApiError::Http { status: 302, .. }), "{err:?}");
+        assert!(!dest.exists());
+        assert_eq!(
+            canonicalize(&api, &format!("{}/s-{i}", server.base)).unwrap(),
+            Canonicalized::NoMatch
+        );
+    }
+    assert!(elsewhere.requests().is_empty(), "{:?}", elsewhere.paths());
+    // 直接给名单外的地址或回环地址，连之前就拒
+    for target in [
+        format!("http://localhost:{port}/c.jpg"),
+        format!("http://127.0.0.2:{port}/c.jpg"),
+    ] {
+        let url = url::Url::parse(&target).unwrap();
+        let err = api
+            .download(
+                &url,
+                &tmp.path().join("x.jpg"),
+                1024,
+                Duration::from_secs(5),
+                "t",
+            )
+            .unwrap_err();
+        assert!(matches!(err, ApiError::Refused(_)), "{err:?}");
+    }
+    assert!(elsewhere.requests().is_empty(), "{:?}", elsewhere.paths());
+}
+
+#[test]
+fn a_media_address_that_resolves_inside_falls_back_to_the_backup() {
+    // 主地址在允许的媒体主机上，但解析到内网：连之前就拒，改用备用地址
+    let server = Server::start(|req, base| match req.path.as_str() {
+        "/x/player/playurl" => Response::json(fixture("playurl.json", base).replace(
+            "https://evil.example/video-32.m4s",
+            "https://inner.hdslb.com/video-32.m4s",
+        )),
+        _ => bilibili(req, base),
+    });
+    let api = api_for(&server, None);
+    let tmp = tempfile::tempdir().unwrap();
+    let out = video::fetch(&api, &video_url(BV), tmp.path(), Some(&[OutputKind::Video])).unwrap();
+    assert_eq!(out.missing, Vec::<OutputKind>::new());
+    assert_eq!(
+        std::fs::read(tmp.path().join("media/video.m4s")).unwrap(),
+        b"VIDEO32"
+    );
+    assert!(server.paths().contains(&"/cdn/video-32.m4s".to_owned()));
 }

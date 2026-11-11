@@ -1,6 +1,6 @@
 //! `canonicalize`：认出 B站视频的身份。`fetch` 用同一个函数，所以两边给的身份一样。
 
-use usuyo_plugin::protocol::{CallFailure, Canonicalized, ErrorCode, Identity, PlatformId};
+use usuyo_plugin_kit::protocol::{CallFailure, Canonicalized, ErrorCode, Identity, PlatformId};
 
 use crate::api::Bilibili;
 use crate::ids::{Parsed, VideoRef, parse_input};
