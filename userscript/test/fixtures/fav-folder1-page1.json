@@ -1,0 +1,17 @@
+{
+  "code": 0,
+  "message": "0",
+  "ttl": 1,
+  "data": {
+    "info": { "id": 1001, "fid": 10, "mid": 42, "attr": 0, "title": "示例收藏夹甲", "type": 11, "media_count": 6 },
+    "medias": [
+      { "id": 100001, "type": 2, "title": "示例视频 1", "attr": 0, "upper": { "mid": 501, "name": "示例UP主甲" }, "ctime": 1700000000, "pubtime": 1700000000, "fav_time": 1700001000, "bv_id": "BV1Aa0000001", "bvid": "BV1Aa0000001" },
+      { "id": 100002, "type": 2, "title": "示例视频 2", "attr": 0, "upper": { "mid": 502, "name": "示例UP主乙" }, "ctime": 1700000100, "pubtime": 1700000100, "fav_time": 1700002000, "bv_id": "BV1Aa0000002", "bvid": "BV1Aa0000002" },
+      { "id": 100003, "type": 2, "title": "示例视频 3", "attr": 0, "upper": { "mid": 501, "name": "示例UP主甲" }, "ctime": 1700000200, "pubtime": 1700000200, "fav_time": 1700003000, "bv_id": "BV1Aa0000003", "bvid": "BV1Aa0000003" },
+      { "id": 900001, "type": 12, "title": "示例音频", "attr": 0, "upper": { "mid": 503, "name": "示例UP主丙" }, "fav_time": 1700004000, "bv_id": "", "bvid": "" },
+      { "id": 900002, "type": 21, "title": "示例合集", "attr": 0, "upper": { "mid": 504, "name": "示例UP主丁" }, "fav_time": 1700005000, "bv_id": "", "bvid": "" },
+      { "id": 100004, "type": 2, "title": "已失效视频", "attr": 9, "upper": { "mid": 0, "name": "" }, "fav_time": 1700006000, "bv_id": "BV1Aa0000004", "bvid": "BV1Aa0000004" }
+    ],
+    "has_more": true
+  }
+}

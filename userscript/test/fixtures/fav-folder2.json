@@ -1,0 +1,12 @@
+{
+  "code": 0,
+  "message": "0",
+  "ttl": 1,
+  "data": {
+    "info": { "id": 1002, "fid": 11, "mid": 42, "attr": 0, "title": "示例收藏夹乙", "type": 11, "media_count": 1 },
+    "medias": [
+      { "id": 100006, "type": 2, "title": "示例视频 6", "attr": 0, "upper": { "mid": 506, "name": "示例UP主己" }, "ctime": 1700000400, "pubtime": 1700000400, "fav_time": 1700008000, "bv_id": "BV1Aa0000006", "bvid": "BV1Aa0000006" }
+    ],
+    "has_more": false
+  }
+}

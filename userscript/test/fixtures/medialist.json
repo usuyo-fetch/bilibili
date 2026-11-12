@@ -1,0 +1,14 @@
+{
+  "_note": "NOT MEASURED: no account was available. Shape taken from memory of the bilibili-API-collect notes for x/v2/medialist/resource/list as used by /list/watchlater (data.media_list[] with bv_id, type, title, upper.name, fav_time in unix seconds). Content invented.",
+  "code": 0,
+  "message": "0",
+  "ttl": 1,
+  "data": {
+    "media_list": [
+      { "id": 11, "type": 2, "bv_id": "BV1Bb0000001", "title": "示例稍后再看 1", "upper": { "mid": 601, "name": "示例UP主庚" }, "fav_time": 1700010000 },
+      { "id": 14, "type": 2, "bv_id": "BV1Bb0000004", "title": "示例稍后再看 4", "upper": { "mid": 604, "name": "示例UP主壬" }, "fav_time": 1700013000 },
+      { "id": 15, "type": 24, "bv_id": "", "title": "示例剧集", "upper": { "mid": 605, "name": "示例UP主癸" }, "fav_time": 1700014000 }
+    ],
+    "has_more": false
+  }
+}

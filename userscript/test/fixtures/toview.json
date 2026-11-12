@@ -1,0 +1,14 @@
+{
+  "_note": "NOT MEASURED: no account was available. Shape taken from memory of the bilibili-API-collect notes for x/v2/history/toview (data.list[] with bvid, title, owner.name, add_at in unix seconds). Content invented.",
+  "code": 0,
+  "message": "0",
+  "ttl": 1,
+  "data": {
+    "count": 3,
+    "list": [
+      { "aid": 1, "bvid": "BV1Bb0000001", "title": "示例稍后再看 1", "owner": { "mid": 601, "name": "示例UP主庚" }, "add_at": 1700010000, "pubdate": 1700000000 },
+      { "aid": 2, "bvid": "BV1Bb0000002", "title": "示例稍后再看 2", "owner": { "mid": 602, "name": "示例UP主辛" }, "add_at": 1700011000, "pubdate": 1700000100 },
+      { "aid": 3, "bvid": "BV1Bb0000003", "title": "已失效视频", "owner": { "mid": 0, "name": "" }, "add_at": 1700012000, "attr": 1 }
+    ]
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "code": 0,
+  "message": "0",
+  "ttl": 1,
+  "data": {
+    "info": { "id": 1001, "fid": 10, "mid": 42, "attr": 0, "title": "示例收藏夹甲", "type": 11, "media_count": 6 },
+    "medias": [
+      { "id": 100003, "type": 2, "title": "示例视频 3", "attr": 0, "upper": { "mid": 501, "name": "示例UP主甲" }, "ctime": 1700000200, "pubtime": 1700000200, "fav_time": 1700003000, "bv_id": "BV1Aa0000003", "bvid": "BV1Aa0000003" },
+      { "id": 100005, "type": 2, "title": "示例视频 5", "attr": 0, "upper": { "mid": 505, "name": "示例UP主戊" }, "ctime": 1700000300, "pubtime": 1700000300, "fav_time": 1700007000, "bv_id": "BV1Aa0000005", "bvid": "BV1Aa0000005" }
+    ],
+    "has_more": false
+  }
+}
