@@ -76,6 +76,9 @@ methods:
     risk:
       text: B站 2026 年给接口文档、SDK、下载器的维护者发律师函，点名登录态、签名鉴权的适配
       source: {label: "调研 06 §16.3", url: "https://github.com/usuyo/usuyo/blob/main/docs/research/06-platform-access-and-account-risk.md#163-下架停更与法律风险"}
+    capabilities:
+      fetch:
+        outputs: [media:video, media:audio, subtitle]
 pacing:
   bilibili: {batch: true, interval: 5s, daily: 500}
 permissions:
