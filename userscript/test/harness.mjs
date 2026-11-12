@@ -46,6 +46,9 @@ class Element {
     }
     return null;
   }
+  select() {
+    this.selected = true;
+  }
   attachShadow() {
     this.shadow = new Element('#shadow-root');
     return this.shadow;
@@ -101,7 +104,7 @@ export async function startListener(answer) {
 
 // ---------- 载入脚本 ----------
 
-export function load({ port, path = '/42/favlist', host = 'space.bilibili.com', origin }) {
+export function load({ port, path = '/42/favlist', host = 'space.bilibili.com', origin, clipboard = 'ok', fetchImpl }) {
   const marker = 'const PORT = 47615;';
   if (!SOURCE.includes(marker)) throw new Error('port line not found in the script');
   const source = SOURCE.replace(marker, 'const PORT = ' + port + ';');
@@ -126,7 +129,7 @@ export function load({ port, path = '/42/favlist', host = 'space.bilibili.com', 
       prompted.push(message);
       return promptAnswers.length ? promptAnswers.shift() : null;
     },
-    fetch: (input, init) => fetch(input, init),
+    fetch: fetchImpl || ((input, init) => fetch(input, init)),
     XMLHttpRequest: class {
       open() {}
       send() {}
@@ -167,9 +170,19 @@ export function load({ port, path = '/42/favlist', host = 'space.bilibili.com', 
     req.end();
   }
 
-  const names = ['unsafeWindow', 'document', 'GM_getValue', 'GM_setValue', 'GM_xmlhttpRequest', 'GM_registerMenuCommand', 'Element', 'crypto', 'setInterval'];
+  // 剪贴板：'ok' 收下，'refuse' 拒绝，'none' 没有这个接口
+  const copied = [];
+  const navigator = {
+    clipboard:
+      clipboard === 'none'
+        ? undefined
+        : { writeText: (text) => (clipboard === 'refuse' ? Promise.reject(new Error('denied')) : (copied.push(text), Promise.resolve())) },
+  };
+
+  const names = ['navigator', 'unsafeWindow', 'document', 'GM_getValue', 'GM_setValue', 'GM_xmlhttpRequest', 'GM_registerMenuCommand', 'Element', 'crypto', 'setInterval'];
   const run = new Function(...names, source);
   run(
+    navigator,
     page,
     document,
     (k, d) => (gm.has(k) ? structuredClone(gm.get(k)) : d),
@@ -195,8 +208,11 @@ export function load({ port, path = '/42/favlist', host = 'space.bilibili.com', 
     gmRequests,
     violations,
     pageStorage,
+    copied,
+    paste: () => panel().find((e) => e.tagName === 'textarea'),
     tick,
     panelText: () => panel().textContent,
+    warnText: () => panel().find((e) => e.className === 'warn').text,
     note: () => panel().find((e) => e.text !== undefined && /note/.test(e.className || '')).text,
     click: (label) => button(label).click(),
     answerPrompt: (value) => promptAnswers.push(value),

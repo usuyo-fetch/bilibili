@@ -422,3 +422,329 @@ test('page-patched builtins never see the token', { skip: !BIN && 'USUYO_BIN not
   assert.ok(!s.hasInput());
   noLeak(s, deliverToken, PORT);
 });
+
+// ---------- 诊断（复制诊断） ----------
+
+const DIAG_START = '  // ---------- 诊断：只记回答的形状，不记任何值 ----------';
+const DIAG_END = '  // ---------- 诊断结束 ----------';
+const SCRIPT_TEXT = readFileSync(new URL('../usuyo-bilibili-saved.user.js', import.meta.url), 'utf8');
+
+function diagBlock(text) {
+  const start = text.indexOf(DIAG_START);
+  const end = text.indexOf(DIAG_END);
+  assert.ok(start >= 0 && end > start, 'diagnosis block markers');
+  return text.slice(start, end + DIAG_END.length);
+}
+
+const wait = (ms = 30) => new Promise((r) => setTimeout(r, ms));
+
+/** 页面的 fetch 换成固定回答，并数它被调了几次。 */
+function answering(body, status = 200) {
+  const calls = [];
+  const fetchImpl = async (input) => {
+    calls.push(String(input));
+    return new Response(typeof body === 'string' ? body : JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
+  };
+  return { fetchImpl, calls };
+}
+
+async function copyOut(s) {
+  s.click('复制诊断');
+  await wait(5);
+  return s.copied[s.copied.length - 1];
+}
+
+// mulberry32：小的种子也给出分散的头几个值
+function rng(seed) {
+  let t0 = seed >>> 0;
+  return () => {
+    t0 = (t0 + 0x6d2b79f5) >>> 0;
+    let t = t0;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 2 ** 32;
+  };
+}
+
+// 代表内容的字符串：id、url、名字、令牌、正文、里面带 JSON 的字符串
+function markerString(r, i) {
+  const kinds = [
+    () => 'MARK' + i + 'x' + Math.floor(r() * 1e9),
+    () => 'https://mark' + i + '.example.invalid/v?token=MARK' + i,
+    () => String(14545102784038246591n + BigInt(i)),
+    () => 'v2_0600002310' + i + 'MARK@finder',
+    () => '标记内容' + i + ' MARK' + i,
+    () => '{"inner":"MARKJSON' + i + '","n":' + i + '}',
+  ];
+  return kinds[Math.floor(r() * kinds.length)]();
+}
+
+function randomValue(r, depth, markers) {
+  const pick = r();
+  if (depth > 4 || pick < 0.35) {
+    const m = markerString(r, markers.length);
+    markers.push(m);
+    return m;
+  }
+  if (pick < 0.45) {
+    const n = 900000000 + Math.floor(r() * 99999999);
+    markers.push(String(n));
+    return n;
+  }
+  if (pick < 0.7) return Array.from({ length: Math.floor(r() * 4) }, () => randomValue(r, depth + 1, markers));
+  const obj = {};
+  const n = 1 + Math.floor(r() * 4);
+  for (let i = 0; i < n; i++) {
+    // 字段名一样的键，和长得像内容的键（id、中文、url），后一种不能出现在诊断里
+    if (r() < 0.5) {
+      obj['field' + String.fromCharCode(97 + i)] = randomValue(r, depth + 1, markers);
+    } else {
+      const k = markerString(r, markers.length);
+      markers.push(k);
+      obj[k] = randomValue(r, depth + 1, markers);
+    }
+  }
+  return obj;
+}
+
+
+const fixtureText = (name) => readFileSync(new URL('./fixtures/' + name, import.meta.url), 'utf8');
+
+const FAV = '/x/v3/fav/resource/list?media_id=1001&pn=1&ps=20&platform=web';
+
+test('the diagnosis never holds a planted value, key or path id', async () => {
+  let nested = 0;
+  for (let seed = 1; seed <= 300; seed++) {
+    const r = rng(seed);
+    const markers = [];
+    const body = { root: randomValue(r, 1, markers), [markerString(r, -1)]: randomValue(r, 1, markers) };
+    markers.push(Object.keys(body)[1]);
+    if (JSON.stringify(body).includes('field')) nested++;
+    const { fetchImpl } = answering(body);
+    const s = load({ port: 1, fetchImpl });
+    await s.page.fetch('https://api.bilibili.com/x/v3/fav/MARKID9abc/resource/list?media_id=MARKQ&cursor=MARKCURSOR');
+    await s.page.fetch('https://api.bilibili.com/x/v2/history/toview/MARKword' + 'x'.repeat(30));
+    await wait(5);
+    const out = await copyOut(s);
+    for (const m of [...markers, 'MARKID9abc', 'MARKQ', 'MARKCURSOR']) {
+      assert.ok(!out.includes(m), `seed ${seed}: ${JSON.stringify(m)} leaked into ${out}`);
+    }
+    assert.ok(!/MARK|标记|\bmark\d/.test(out), `seed ${seed}: marker fragment leaked into ${out}`);
+  }
+  assert.ok(nested > 100, 'generator produced nested objects');
+});
+
+test('the diagnosis keeps key paths, types and lengths of an answer', async () => {
+  const { fetchImpl } = answering({ code: 0, data: { other: { items: [{ name: 'hello' }, { name: 'hi', url: 'x' }], count: 4 } } });
+  const s = load({ port: 1, fetchImpl });
+  await s.page.fetch(list(FAV));
+  await wait();
+  const d = JSON.parse(await copyOut(s));
+  assert.deepEqual(d.answers[0].shape, { code: 'number', data: { other: { items: { $array: 2, $items: { name: 'string:2..5', url: 'string:1' } }, count: 'number' } } });
+});
+
+test('repeats merge and the number of kept answers is bounded', async () => {
+  const { fetchImpl } = answering({ code: 0, data: {} });
+  const s = load({ port: 1, fetchImpl });
+  const name = (i) => 'x/v3/fav/' + String.fromCharCode(97 + (i % 26)) + String.fromCharCode(97 + Math.floor(i / 26));
+  const url = (i) => 'https://api.bilibili.com/' + name(i);
+  for (let i = 0; i < 50; i++) await s.page.fetch(url(i));
+  await wait(60);
+  let d = JSON.parse(await copyOut(s));
+  assert.equal(d.answers.length, 20);
+  assert.equal(d.looked, 50);
+  assert.equal(d.dropped, 30);
+  assert.deepEqual(d.answers.map((a) => a.path), Array.from({ length: 20 }, (_, i) => '/' + name(30 + i)));
+  // 同一个请求再来 5 次：并成一条，不挤掉别的
+  for (let i = 0; i < 5; i++) await s.page.fetch(url(49) + '?cursor=' + i);
+  await wait(60);
+  d = JSON.parse(await copyOut(s));
+  assert.equal(d.answers.length, 20);
+  const last = d.answers[d.answers.length - 1];
+  assert.equal(last.path, '/' + name(49));
+  assert.equal(last.answers, 6);
+  assert.equal(d.dropped, 30);
+});
+
+test('a recognised list answer records its counts', async () => {
+  const s = load({ port: 1 });
+  await browseFavorites(s);
+  const d = JSON.parse(await copyOut(s));
+  assert.equal(d.tool, 'usuyo-bilibili-saved');
+  assert.equal(d.page, 'favlist');
+  assert.equal(d.recognised, 3);
+  assert.equal(d.answers.length, 1, 'three pages of one interface merge');
+  const a = d.answers[0];
+  assert.equal(a.path, '/x/v3/fav/resource/list');
+  assert.deepEqual({ status: a.status, json: a.json, recognised: a.recognised, took: a.took, answers: a.answers }, { status: 200, json: true, recognised: true, took: 6, answers: 3 });
+  // 第一页：两条不是视频的、一条失效的
+  assert.deepEqual(a.skipped, { notVideo: 2, badId: 0, removed: 1 });
+  assert.deepEqual(a.stopped, []);
+  assert.equal(a.shape.data.medias.$items.upper.name !== undefined, true);
+});
+
+test('both watch-later answers are recorded on the watch-later page', async () => {
+  const s = load({ port: 1, host: 'www.bilibili.com', path: '/list/watchlater' });
+  await browseLater(s);
+  const d = JSON.parse(await copyOut(s));
+  assert.equal(d.page, 'watchlater');
+  assert.deepEqual(d.answers.map((a) => [a.path, a.recognised, a.took]), [
+    ['/x/v2/history/toview/web', true, 2],
+    ['/x/v2/medialist/resource/list', true, 2],
+  ]);
+});
+
+test('an unrecognised answer on a list path is recorded as not recognised', async () => {
+  for (const [body, status, stopped] of [
+    [{ code: 0, data: { renamed: [{ a: 1 }] } }, 200, []],
+    [{ code: -101, message: 'x' }, 200, ['errorCode']],
+    ['<html>blocked</html>', 412, []],
+  ]) {
+    const { fetchImpl } = answering(body, status);
+    const s = load({ port: 1, fetchImpl });
+    await s.page.fetch(list(FAV));
+    await wait();
+    const d = JSON.parse(await copyOut(s));
+    assert.equal(d.recognised, 0);
+    const a = d.answers[0];
+    assert.deepEqual({ status: a.status, json: a.json, recognised: a.recognised, took: a.took, stopped: a.stopped }, { status, json: typeof body !== 'string', recognised: false, took: 0, stopped });
+  }
+  // 名字像、但脚本不认的接口也记下来；别的接口不看
+  const s = load({ port: 1 });
+  await s.page.fetch(list('/x/v3/fav/folder/created/list-all?up_mid=42'));
+  await s.page.fetch(list('/x/web-interface/nav'));
+  await wait();
+  const d = JSON.parse(await copyOut(s));
+  assert.deepEqual(d.answers.map((a) => [a.path, a.status, a.recognised]), [['/x/v3/fav/folder/created/list-all', 404, false]]);
+  assert.equal(s.gm.get('items'), undefined);
+});
+
+test('an xhr answer is recorded the same way', async () => {
+  const s = load({ port: 1 });
+  const x = new s.page.XMLHttpRequest();
+  const listeners = {};
+  x.addEventListener = (t, fn) => (listeners[t] = fn);
+  x.open('GET', list(FAV));
+  x.send();
+  x.responseType = '';
+  x.responseText = fixtureText('fav-folder1-page1.json');
+  x.status = 200;
+  listeners.load();
+  const d = JSON.parse(await copyOut(s));
+  assert.deepEqual(d.answers.map((a) => [a.path, a.status, a.recognised, a.took]), [['/x/v3/fav/resource/list', 200, true, 3]]);
+});
+
+test('copying puts the text on the clipboard and sends it nowhere else', async () => {
+  const { fetchImpl, calls } = answering({ code: 0, data: { medias: [] } });
+  const s = load({ port: 1, fetchImpl });
+  await s.page.fetch(list(FAV));
+  await wait();
+  const items = structuredClone(s.gm.get('items'));
+  const text = await copyOut(s);
+  assert.equal(s.copied.length, 1);
+  assert.equal(typeof JSON.parse(text).version, 'string');
+  assert.match(s.note(), /诊断已复制，只含结构/);
+  assert.match(s.panelText(), /诊断里只有回答的结构，没有任何内容/);
+  assert.equal(s.paste().style.display, 'none');
+  assert.deepEqual(s.gmRequests, []);
+  assert.deepEqual(s.violations, []);
+  assert.equal(s.pageStorage.size, 0);
+  assert.deepEqual(s.gm.get('items'), items);
+  assert.equal(calls.length, 1, 'no request beyond the page own');
+  assert.ok(!s.hasInput());
+});
+
+test('a refused or missing clipboard falls back to a selected text box', async () => {
+  for (const clipboard of ['refuse', 'none']) {
+    const s = load({ port: 1, clipboard });
+    await browseFavorites(s);
+    s.click('复制诊断');
+    await wait(5);
+    const box = s.paste();
+    assert.equal(box.style.display, 'block');
+    assert.equal(box.selected, true);
+    assert.equal(box.readOnly, true);
+    assert.equal(JSON.parse(box.value).tool, 'usuyo-bilibili-saved');
+    assert.match(s.note(), /没能写进剪贴板/);
+    assert.deepEqual(s.copied, []);
+    assert.deepEqual(s.gmRequests, []);
+  }
+});
+
+test('the diagnosis holds none of the fixture titles, names or ids', async () => {
+  const s = load({ port: 1, host: 'www.bilibili.com', path: '/list/watchlater' });
+  await browseFavorites(s);
+  await browseLater(s);
+  const text = await copyOut(s);
+  // 回答里所有字符串值（标题、名字、BV 号）和数字 id，一个都不能出现
+  const values = new Set();
+  const walk = (v) => {
+    if (typeof v === 'string' && v.length > 1) values.add(v);
+    else if (typeof v === 'number' && String(v).length > 2) values.add(String(v));
+    else if (v && typeof v === 'object') Object.values(v).forEach(walk);
+  };
+  for (const name of ['fav-folder1-page1.json', 'fav-folder1-page2.json', 'fav-folder2.json', 'toview.json', 'medialist.json']) walk(JSON.parse(fixtureText(name)));
+  for (const word of ['示例', 'BV1', '100001', '900001', 'UP主']) values.add(word);
+  values.delete('0');
+  for (const v of values) {
+    // 字段名、固定的词（code、data、has_more…）不是内容；只查值
+    if (/^(code|message|data|info|medias|list|media_list|ttl|count|title|type|upper|name|owner|bvid|bv_id|fav_time|add_at|attr)$/.test(v)) continue;
+    assert.ok(!text.includes(v), 'value ' + v + ' in the diagnosis');
+  }
+  assert.ok(!/https?:/.test(text), 'no url');
+  assert.ok(!text.includes('127.0.0.1'));
+});
+
+test('a quiet page says so once, calmly, and only until a list answer is recognised', async (t) => {
+  const realNow = Date.now;
+  t.after(() => (Date.now = realNow));
+  const s = load({ port: 1 });
+  assert.match(s.note(), /自己往下翻/);
+  const base = realNow();
+  Date.now = () => base + 31000;
+  s.tick();
+  assert.match(s.note(), /还没认出列表的回答.*复制诊断/);
+  assert.ok(!/[0-9]/.test(s.note()), 'no counts in the sentence');
+  assert.equal(s.warnText(), '', 'nothing in the warning line');
+  await browseFavorites(s);
+  s.tick();
+  assert.doesNotMatch(s.note(), /还没认出/);
+  // 不在收藏夹、稍后再看页上不提
+  const other = load({ port: 1, host: 'www.bilibili.com', path: '/video/BV1xx' });
+  Date.now = () => base + 90000;
+  other.tick();
+  assert.doesNotMatch(other.note(), /还没认出/);
+});
+
+test('the version is bumped and the diagnosis code is the same in all three scripts', () => {
+  assert.match(SCRIPT_TEXT, /^\/\/ @version      0\.2\.0$/m);
+  assert.ok(SCRIPT_TEXT.includes("const VERSION = '0.2.0';"));
+  for (const sibling of ['../../../x/userscript/usuyo-x-saved.user.js', '../../../xiaohongshu/userscript/usuyo-xhs-saved.user.js']) {
+    const url = new URL(sibling, import.meta.url);
+    assert.ok(existsSync(url), 'sibling script is expected at ' + url.pathname);
+    assert.equal(diagBlock(SCRIPT_TEXT), diagBlock(readFileSync(url, 'utf8')));
+  }
+  assert.equal(SCRIPT_TEXT.match(/^\/\/ @connect\s+.*$/gm).length, 1);
+});
+
+test('an empty diagnosis still says whether requests reached the script', async () => {
+  const { fetchImpl } = answering({});
+  const s = load({ port: 1, fetchImpl });
+  let d = JSON.parse(await copyOut(s));
+  assert.deepEqual({ requests: d.requests, looked: d.looked, answers: d.answers }, { requests: 0, looked: 0, answers: [] });
+  assert.equal(typeof d.startedAs, 'string');
+  await s.page.fetch('https://api.bilibili.com/x/web-interface/nav');
+  await wait();
+  d = JSON.parse(await copyOut(s));
+  assert.deepEqual({ requests: d.requests, looked: d.looked, answers: d.answers }, { requests: 1, looked: 0, answers: [] });
+});
+
+test('a protocol-relative address loses its host and merges with the full one', async () => {
+  const { fetchImpl } = answering({});
+  const s = load({ port: 1, fetchImpl });
+  await s.page.fetch('//api.bilibili.com/x/v3/fav/resource/list?media_id=1');
+  await s.page.fetch('https://api.bilibili.com/x/v3/fav/resource/list?media_id=1');
+  await wait();
+  const d = JSON.parse(await copyOut(s));
+  assert.deepEqual(d.answers.map((a) => [a.path, a.answers]), [['/x/v3/fav/resource/list', 2]]);
+});
