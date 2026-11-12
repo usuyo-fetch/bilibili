@@ -1,0 +1,58 @@
+{
+ "code": 0,
+ "message": "0",
+ "ttl": 1,
+ "data": {
+  "info": {
+   "id": 777,
+   "fid": 7,
+   "mid": 4242,
+   "attr": 0,
+   "title": "手冲咖啡",
+   "upper": {
+    "mid": 4242,
+    "name": "一个公开收藏的人"
+   },
+   "media_count": 3
+  },
+  "medias": [
+   {
+    "id": 9001,
+    "type": 2,
+    "title": "三段式注水",
+    "cover": "x",
+    "intro": "",
+    "page": 1,
+    "duration": 183,
+    "upper": {
+     "mid": 31,
+     "name": "咖啡日常"
+    },
+    "attr": 0,
+    "ctime": 1790000000,
+    "pubtime": 1790000000,
+    "fav_time": 1793000300,
+    "bvid": "BV1bbbbbbbb1"
+   },
+   {
+    "id": 9002,
+    "type": 2,
+    "title": "已失效视频",
+    "cover": "x",
+    "intro": "",
+    "page": 1,
+    "duration": 0,
+    "upper": {
+     "mid": 0,
+     "name": ""
+    },
+    "attr": 9,
+    "ctime": 0,
+    "pubtime": 0,
+    "fav_time": 1793000200,
+    "bvid": "BV1bbbbbbbb2"
+   }
+  ],
+  "has_more": true
+ }
+}

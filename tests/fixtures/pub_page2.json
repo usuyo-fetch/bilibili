@@ -1,0 +1,33 @@
+{
+ "code": 0,
+ "message": "0",
+ "ttl": 1,
+ "data": {
+  "info": {
+   "id": 777,
+   "title": "手冲咖啡",
+   "media_count": 3
+  },
+  "medias": [
+   {
+    "id": 9003,
+    "type": 2,
+    "title": "闷蒸三十秒",
+    "cover": "x",
+    "intro": "",
+    "page": 1,
+    "duration": 60,
+    "upper": {
+     "mid": 32,
+     "name": "冲煮笔记"
+    },
+    "attr": 0,
+    "ctime": 1780000000,
+    "pubtime": 1780000000,
+    "fav_time": 1792000000,
+    "bvid": "BV1bbbbbbbb3"
+   }
+  ],
+  "has_more": false
+ }
+}

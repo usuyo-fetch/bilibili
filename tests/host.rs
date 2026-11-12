@@ -4,7 +4,9 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use serde_json::Value;
-use usuyo_plugin::protocol::{Access, Canonicalized, ErrorCode, Identity, ListOrder, Login};
+use usuyo_plugin::protocol::{
+    Access, Account, Canonicalized, ErrorCode, Identity, ListOrder, Login,
+};
 use usuyo_plugin::{
     CallLimits, CallOptions, HostConfig, ListRequest, PluginError, PluginHost, discover,
 };
@@ -72,7 +74,10 @@ fn health_does_not_touch_the_network() {
 
 #[test]
 fn login_only_commands_fail_cleanly_without_credentials() {
-    for args in [&["sources"][..], &["list", "bilibili:toview"][..]] {
+    for args in [
+        &["sources", "--method", "favorites"][..],
+        &["list", "bilibili:toview", "--method", "favorites"][..],
+    ] {
         let (code, out) = run(args, &[]);
         assert_eq!(code, 1, "{args:?}");
         assert_eq!(out["ok"], false);
@@ -91,7 +96,7 @@ fn a_bad_credentials_file_is_an_internal_error_without_its_content() {
     )
     .unwrap();
     let (code, out) = run(
-        &["sources"],
+        &["sources", "--method", "favorites"],
         &[("USUYO_CREDENTIALS", path.to_str().unwrap())],
     );
     assert_eq!(code, 1);
@@ -105,8 +110,23 @@ fn fetch_does_not_open_the_credentials_file() {
     let tmp = tempfile::tempdir().unwrap();
     let missing = tmp.path().join("no-such-credentials.json");
     let env = [("USUYO_CREDENTIALS", missing.to_str().unwrap())];
-    let (code, out) = run(&["sources"], &env);
+    let (code, out) = run(&["sources", "--method", "favorites"], &env);
     assert_eq!((code, &out["error"]["code"]), (1, &Value::from("internal")));
+    // 公开收藏夹不读凭据：认不出的链接在发请求之前就回
+    let (code, out) = run(
+        &[
+            "sources",
+            "--method",
+            "favorites-public",
+            "--link",
+            "https://example.com/u/1",
+        ],
+        &env,
+    );
+    assert_eq!(
+        (code, &out["error"]["code"]),
+        (1, &Value::from("unsupported-input"))
+    );
 
     // 不是 B站的链接：不发请求，在读到凭据之前就能判定
     let (code, out) = run(
@@ -115,6 +135,8 @@ fn fetch_does_not_open_the_credentials_file() {
             "https://example.com/x",
             "--out",
             tmp.path().to_str().unwrap(),
+            "--method",
+            "view",
         ],
         &env,
     );
@@ -128,11 +150,62 @@ fn bad_usage_exits_2() {
         &[][..],
         &["nope"][..],
         &["fetch", "x"][..],
+        &["fetch", "x", "--out", "/o"][..],
+        &["sources"][..],
         &["canonicalize"][..],
     ] {
         let (code, out) = run(args, &[]);
         assert_eq!((code, out), (2, Value::Null), "{args:?}");
     }
+}
+
+#[test]
+fn each_call_goes_to_its_method() {
+    // 方法和调用对不上的回 invalid-args，不发请求
+    for args in [
+        &["sources", "--method", "view"][..],
+        &["sources", "--method", "favorites-public"][..],
+        &[
+            "sources",
+            "--method",
+            "favorites",
+            "--link",
+            "https://space.bilibili.com/1",
+        ][..],
+        &["list", "bilibili:fav-public:1", "--method", "userscript"][..],
+        &[
+            "fetch",
+            "https://www.bilibili.com/video/BV17x411w7KC",
+            "--out",
+            "/o",
+            "--method",
+            "favorites",
+        ][..],
+        &[
+            "fetch",
+            "https://www.bilibili.com/video/BV17x411w7KC",
+            "--out",
+            "/o",
+            "--method",
+            "yutto",
+        ][..],
+    ] {
+        let (code, out) = run(args, &[]);
+        assert_eq!(
+            (code, &out["error"]["code"]),
+            (1, &Value::from("invalid-args")),
+            "{args:?}"
+        );
+    }
+    // 公开收藏夹的来源只认自己的前缀，不发请求
+    let (code, out) = run(
+        &["list", "bilibili:fav:1", "--method", "favorites-public"],
+        &[],
+    );
+    assert_eq!(
+        (code, &out["error"]["code"]),
+        (1, &Value::from("unsupported-input"))
+    );
 }
 
 /// 清单装成宿主认的样子：`<root>/usuyo-fetch/bilibili/<version>/`。
@@ -163,18 +236,47 @@ async fn the_manifest_loads_and_matches_bilibili_links() {
     let plugin = &host.plugins()[0];
     assert_eq!(plugin.id().as_str(), "usuyo-fetch/bilibili");
     assert_eq!(plugin.header.version.to_string(), env!("CARGO_PKG_VERSION"));
-    let caps = &plugin.spec.capabilities;
-    let (fetch, list) = (caps.fetch.as_ref().unwrap(), caps.list.as_ref().unwrap());
+    let spec = &plugin.spec;
+    // routes.md 第 5 节的每一行（client-hook 那行在另一个组织），顺序照清单
+    let ids: Vec<&str> = spec.methods.iter().map(|m| m.id.as_str()).collect();
     assert_eq!(
-        (fetch.uses.access, fetch.uses.login),
-        (Access::PublicWeb, Login::None)
+        ids,
+        [
+            "view",
+            "favorites-public",
+            "favorites",
+            "userscript",
+            "yutto"
+        ]
     );
-    assert!(fetch.uses.sites.is_empty());
+    let view = spec.method("view").unwrap();
     assert_eq!(
-        (list.uses.access, list.uses.login),
+        (view.access, view.login, view.account),
+        (Access::PublicWeb, Login::None, Account::None)
+    );
+    assert!(view.sites.is_empty() && view.capabilities.fetch.is_some());
+    let public = spec.method("favorites-public").unwrap();
+    assert!(public.sites.is_empty() && public.on_by_default());
+    let public_list = public.capabilities.list.as_ref().unwrap();
+    assert!(public_list.link.is_some() && public_list.sources.is_empty());
+    // 实测一页里从旧到新：不说 newest-first
+    assert_eq!(public_list.order, ListOrder::Unordered);
+    let mine = spec.method("favorites").unwrap();
+    assert_eq!(
+        (mine.access, mine.login, mine.account),
+        (Access::SessionApi, Login::Required, Account::InUsuyo)
+    );
+    assert_eq!(mine.sites, ["www.bilibili.com"]);
+    assert_eq!(
+        mine.capabilities.list.as_ref().unwrap().order,
+        ListOrder::NewestFirst
+    );
+    assert!(spec.method("userscript").unwrap().delivers.is_some());
+    assert!(!spec.method("yutto").unwrap().built);
+    assert_eq!(
+        (spec.access(), spec.login()),
         (Access::SessionApi, Login::Required)
     );
-    assert_eq!(list.order, ListOrder::NewestFirst);
     assert_eq!(plugin.spec.sites[0].cookies, ["SESSDATA"]);
     for hit in [
         "https://www.bilibili.com/video/BV17x411w7KC",
@@ -208,7 +310,7 @@ async fn list_without_login_is_reported_through_the_host() {
     let (_tmp, host) = host();
     let plugin = &host.plugins()[0];
     let err = host
-        .sources(plugin, &CallOptions::default())
+        .sources(plugin, "favorites", None, &CallOptions::default())
         .await
         .unwrap_err();
     let PluginError::Call { failure, .. } = err else {
@@ -216,6 +318,7 @@ async fn list_without_login_is_reported_through_the_host() {
     };
     assert_eq!(failure.code, ErrorCode::LoginRequired);
     let request = ListRequest {
+        method: "favorites".into(),
         source: "bilibili:toview".into(),
         cursor: None,
         since: None,

@@ -1,5 +1,6 @@
-//! `sources` 和 `list`：我自己的收藏夹和稍后再看。mid 取自 cookie `DedeUserID`，
-//! 不调需要签名的接口。
+//! `sources` 和 `list`：我自己的收藏夹和稍后再看（方法 `favorites`，mid 取自 cookie `DedeUserID`），
+//! 和别人公开的收藏夹（方法 `favorites-public`，从你给的收藏夹或个人空间的链接开始，不带 cookie）。
+//! 两种用同两个接口，都不调需要签名的接口。
 
 use serde::Deserialize;
 use usuyo_plugin_kit::protocol::{
@@ -11,6 +12,8 @@ use crate::api::{Bilibili, SITE};
 use crate::ids::{VideoRef, is_bvid};
 
 const FAVORITE_PREFIX: &str = "bilibili:fav:";
+/// 公开收藏夹的来源：`bilibili:fav-public:<收藏夹 id>`。
+const PUBLIC_PREFIX: &str = "bilibili:fav-public:";
 const WATCH_LATER: &str = "bilibili:toview";
 /// 收藏夹每页条数（接口上限）。
 const PAGE_SIZE: u32 = 20;
@@ -35,6 +38,16 @@ struct Folder {
 struct FavoritePage {
     medias: Option<Vec<FavoriteMedia>>,
     has_more: bool,
+    #[serde(default)]
+    info: Option<FolderInfo>,
+}
+
+#[derive(Deserialize)]
+struct FolderInfo {
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    media_count: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -122,6 +135,141 @@ pub fn sources(api: &Bilibili) -> Result<SourcesOutput, CallFailure> {
         count: None,
     });
     Ok(SourcesOutput { sources })
+}
+
+/// 一条链接指着谁的收藏夹。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PublicLink {
+    /// 一个收藏夹的 id（`media_id`）。
+    Folder(String),
+    /// 一个人的 mid：列他公开的收藏夹。
+    User(String),
+}
+
+fn digits(s: &str) -> Option<String> {
+    (!s.is_empty() && s.len() <= 20 && s.bytes().all(|b| b.is_ascii_digit())).then(|| s.to_owned())
+}
+
+/// 认链接：个人空间 `space.bilibili.com/<mid>[/favlist][?fid=<id>]`，收藏夹页
+/// `www.bilibili.com/medialist/detail/ml<id>`、`…/list/ml<id>`，或带 `media_id=<id>` 的。不发请求。
+pub fn public_link(link: &str) -> Option<PublicLink> {
+    let url = url::Url::parse(link.trim()).ok()?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return None;
+    }
+    let host = url.host_str()?.to_ascii_lowercase();
+    let query = |name: &str| {
+        url.query_pairs()
+            .find(|(k, _)| k == name)
+            .and_then(|(_, v)| digits(&v))
+    };
+    let segments: Vec<&str> = url.path_segments()?.filter(|s| !s.is_empty()).collect();
+    match host.as_str() {
+        "space.bilibili.com" => {
+            if let Some(id) = query("fid").or_else(|| query("media_id")) {
+                return Some(PublicLink::Folder(id));
+            }
+            segments
+                .first()
+                .and_then(|m| digits(m))
+                .map(PublicLink::User)
+        }
+        "www.bilibili.com" | "m.bilibili.com" => {
+            if let Some(id) = query("media_id") {
+                return Some(PublicLink::Folder(id));
+            }
+            segments
+                .iter()
+                .find_map(|s| s.strip_prefix("ml").and_then(digits))
+                .map(PublicLink::Folder)
+        }
+        _ => None,
+    }
+}
+
+/// `favorites-public` 的 `sources --link`：一个收藏夹就是它自己，一个人就是他公开的收藏夹。不带 cookie。
+pub fn public_sources(api: &Bilibili, link: &str) -> Result<SourcesOutput, CallFailure> {
+    let target = public_link(link).ok_or_else(|| CallFailure {
+        hint: Some("这条链接不是 B站的收藏夹或个人空间".into()),
+        ..CallFailure::new(
+            ErrorCode::UnsupportedInput,
+            "not a favourites folder or space link",
+        )
+    })?;
+    let sources = match target {
+        PublicLink::Folder(id) => {
+            let reply = api.get(
+                "x/v3/fav/resource/list",
+                &[
+                    ("media_id", id.as_str()),
+                    ("pn", "1"),
+                    ("ps", "20"),
+                    ("platform", "web"),
+                ],
+            )?;
+            let page: FavoritePage = reply.data()?;
+            let info = page.info;
+            vec![SourceInfo {
+                source: format!("{PUBLIC_PREFIX}{id}"),
+                title: info
+                    .as_ref()
+                    .map(|i| i.title.clone())
+                    .filter(|t| !t.is_empty())
+                    .unwrap_or_else(|| format!("收藏夹 {id}")),
+                action: Some(ListAction::Favorite),
+                count: info.and_then(|i| i.media_count),
+            }]
+        }
+        PublicLink::User(mid) => {
+            let reply = api.get(
+                "x/v3/fav/folder/created/list-all",
+                &[("up_mid", mid.as_str())],
+            )?;
+            let folders: Folders = reply.data()?;
+            folders
+                .list
+                .unwrap_or_default()
+                .into_iter()
+                .map(|f| SourceInfo {
+                    source: format!("{PUBLIC_PREFIX}{}", f.id),
+                    title: f.title,
+                    action: Some(ListAction::Favorite),
+                    count: Some(f.media_count),
+                })
+                .collect()
+        }
+    };
+    Ok(SourcesOutput { sources })
+}
+
+/// `favorites-public` 的 `list`：翻一个公开的收藏夹，不带 cookie。清单写 `unordered`：
+/// 2026-11-12 实测一页里按收藏时间从旧到新，所以不拿 `--since` 提前停。
+pub fn public_list(
+    api: &Bilibili,
+    source: &str,
+    cursor: Option<&str>,
+) -> Result<ListPage, CallFailure> {
+    let id = source
+        .strip_prefix(PUBLIC_PREFIX)
+        .and_then(digits)
+        .ok_or_else(|| {
+            CallFailure::new(
+                ErrorCode::UnsupportedInput,
+                format!("unknown source `{source}`"),
+            )
+        })?;
+    let (items, next_cursor) = favorites(api, &id, page_number(cursor)?, None)?;
+    Ok(ListPage {
+        items,
+        next_cursor,
+        evidence: Evidence {
+            fetched_at: Rfc3339::from_timestamp(jiff::Timestamp::now()),
+            access: Access::PublicWeb,
+            site: None,
+            upstream: None,
+            status: None,
+        },
+    })
 }
 
 /// 列一页。`cursor` 是收藏夹的页码；稍后再看一次给完，没有游标。

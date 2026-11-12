@@ -4,12 +4,19 @@
 
 ## 做什么
 
+几种取法各是清单里的一种方法（usuyo 协议 §2.3.1），调用时经 `--method` 指定：
+
+| 方法 | 做什么 | 账号 |
+|---|---|---|
+| `view` | `fetch`：元数据（`view`）、封面、按需要的低画质音视频流 | 不用：即使你登录过，也不读凭据、不带 cookie |
+| `favorites-public` | `sources --link`：你给一个人的个人空间（`space.bilibili.com/<mid>`）就列他公开的收藏夹，给一个收藏夹的链接就是它；`list`：翻一个公开收藏夹，一页 20 条，`actedAt` 是收藏时间；2026-11-12 实测一页里从旧到新，清单写 `unordered` | 不用 |
+| `favorites` | `sources`：你自己的收藏夹和「稍后再看」，mid 取自 cookie `DedeUserID`；`list`：收藏夹按页码翻页，稍后再看一次给完，按加入时间从新到旧 | 在 usuyo 里登录的 B站 |
+| `userscript` | 不在插件里跑：`userscript/` 里的脚本在你的浏览器里把收藏夹、稍后再看交给 usuyo | 只在你的浏览器里 |
+| `yutto` | 还没做：包 yutto 取高清音视频和字幕 | 在 usuyo 里登录的 B站 |
+
 | 子命令 | 说明 |
 |---|---|
-| `canonicalize` | 认出 BV 号、av 号、`b23.tv` 短链和分 P（`BV…:p2`）。av 号离线换成 BV 号；只有短链会发请求，只跟随重定向，不带 cookie |
-| `sources` | 列出你自己的收藏夹和「稍后再看」。你的 mid 取自 cookie `DedeUserID` |
-| `list` | 一页一调，收藏夹按页码翻页，`actedAt` 是收藏时间；稍后再看一次给完，按加入时间从新到旧 |
-| `fetch` | 元数据（`view`）、封面、按需要的低画质音视频流。不用账号：即使你登录过，也不读凭据、不带 cookie |
+| `canonicalize` | 认出 BV 号、av 号、`b23.tv` 短链和分 P（`BV…:p2`）。av 号离线换成 BV 号；只有短链会发请求，只跟随重定向，不带 cookie。不分方法 |
 | `health` | 不发请求；`--probe` 才用登录信息请求一次 `nav` |
 
 `fetch` 的输出目录：

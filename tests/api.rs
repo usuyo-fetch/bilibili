@@ -991,3 +991,167 @@ fn slow_steps_stop_at_the_call_budget_and_keep_the_metadata() {
         assert!(reason.contains("time budget"), "{budget}: {reason}");
     }
 }
+
+/// 别人公开的收藏夹：不带 cookie 的两个接口。带了 cookie 的请求回 -101，证明一个都没带。
+fn public_bilibili(req: &Request, base: &str) -> Response {
+    if req.cookie().is_some() {
+        return Response::json(r#"{"code":-101,"message":"no cookies here","ttl":1}"#);
+    }
+    match req.path.as_str() {
+        "/x/v3/fav/folder/created/list-all" => match req.query["up_mid"].as_str() {
+            "4242" => json_of("pub_folders.json", base),
+            _ => Response::json(r#"{"code":0,"message":"0","ttl":1,"data":null}"#),
+        },
+        "/x/v3/fav/resource/list" => {
+            match (req.query["media_id"].as_str(), req.query["pn"].as_str()) {
+                ("777", "1") => json_of("pub_page1.json", base),
+                ("777", "2") => json_of("pub_page2.json", base),
+                ("999", _) => Response::json(r#"{"code":-403,"message":"访问权限不足","ttl":1}"#),
+                _ => json_of("fav_empty.json", base),
+            }
+        }
+        _ => Response::status(404),
+    }
+}
+
+#[test]
+fn a_public_link_names_a_folder_or_a_person() {
+    use favorites::PublicLink::{Folder, User};
+    for (link, want) in [
+        ("https://space.bilibili.com/4242", Some(User("4242".into()))),
+        (
+            "https://space.bilibili.com/4242/favlist",
+            Some(User("4242".into())),
+        ),
+        (
+            "https://space.bilibili.com/4242/favlist?fid=777&ftype=create",
+            Some(Folder("777".into())),
+        ),
+        (
+            "https://www.bilibili.com/medialist/detail/ml777",
+            Some(Folder("777".into())),
+        ),
+        (
+            "https://www.bilibili.com/list/ml777?oid=1",
+            Some(Folder("777".into())),
+        ),
+        (
+            "https://m.bilibili.com/medialist/play/ml777",
+            Some(Folder("777".into())),
+        ),
+        ("https://www.bilibili.com/video/BV17x411w7KC", None),
+        ("https://space.bilibili.com/abc", None),
+        ("https://space.bilibili.evil/4242", None),
+        ("ftp://space.bilibili.com/4242", None),
+    ] {
+        assert_eq!(favorites::public_link(link), want, "{link}");
+    }
+}
+
+#[test]
+fn public_folders_are_listed_from_a_link_without_cookies() {
+    let server = Server::start(public_bilibili);
+    let api = api_for(&server, None);
+    // 一个人的个人空间：他公开的收藏夹
+    let out = favorites::public_sources(&api, "https://space.bilibili.com/4242/favlist").unwrap();
+    let got: Vec<(&str, &str, Option<u64>)> = out
+        .sources
+        .iter()
+        .map(|s| (s.source.as_str(), s.title.as_str(), s.count))
+        .collect();
+    assert_eq!(
+        got,
+        [
+            ("bilibili:fav-public:777", "手冲咖啡", Some(3)),
+            ("bilibili:fav-public:778", "磨豆机", Some(0)),
+        ]
+    );
+    // 一个收藏夹：就是它，名字取自第一页的 info
+    let out =
+        favorites::public_sources(&api, "https://www.bilibili.com/medialist/detail/ml777").unwrap();
+    assert_eq!(out.sources.len(), 1);
+    assert_eq!(
+        (
+            out.sources[0].source.as_str(),
+            out.sources[0].title.as_str(),
+            out.sources[0].count
+        ),
+        ("bilibili:fav-public:777", "手冲咖啡", Some(3))
+    );
+    // 认不出的链接不发请求
+    let before = server.requests().len();
+    let f = failure(favorites::public_sources(
+        &api,
+        "https://example.com/u/4242",
+    ));
+    assert_eq!(f.code, ErrorCode::UnsupportedInput);
+    assert!(f.hint.is_some());
+    assert_eq!(server.requests().len(), before);
+    assert!(server.requests().iter().all(|r| r.cookie().is_none()));
+}
+
+#[test]
+fn a_public_folder_pages_through_without_cookies() {
+    let server = Server::start(public_bilibili);
+    let api = api_for(&server, None);
+    let page = favorites::public_list(&api, "bilibili:fav-public:777", None).unwrap();
+    // 失效的那条跳过；内容由 view 去取，这里只给链接和身份
+    let ids: Vec<String> = page.items.iter().map(|i| content_id(&i.identity)).collect();
+    assert_eq!(ids, ["BV1bbbbbbbb1"]);
+    let first = &page.items[0];
+    assert_eq!(
+        first.url.as_deref(),
+        Some("https://www.bilibili.com/video/BV1bbbbbbbb1")
+    );
+    assert_eq!(first.action, Some(ListAction::Favorite));
+    assert_eq!(first.author.as_ref().unwrap().name, "咖啡日常");
+    assert!(first.acted_at.is_some());
+    assert_eq!(page.next_cursor.as_deref(), Some("2"));
+    assert_eq!(
+        (page.evidence.access, page.evidence.site.as_deref()),
+        (Access::PublicWeb, None)
+    );
+    let req = server
+        .requests()
+        .into_iter()
+        .find(|r| r.path == "/x/v3/fav/resource/list")
+        .unwrap();
+    assert_eq!(
+        (
+            req.query["media_id"].as_str(),
+            req.query["pn"].as_str(),
+            req.query["ps"].as_str(),
+            req.query["platform"].as_str()
+        ),
+        ("777", "1", "20", "web")
+    );
+    let page = favorites::public_list(&api, "bilibili:fav-public:777", Some("2")).unwrap();
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(page.next_cursor, None);
+    // 设成私密的收藏夹：看不到
+    let f = failure(favorites::public_list(
+        &api,
+        "bilibili:fav-public:999",
+        None,
+    ));
+    assert_eq!(
+        (f.code, f.reason),
+        (ErrorCode::NotFound, Some(NotFoundReason::Private))
+    );
+    assert!(
+        f.detail.as_deref().is_some_and(|d| d.contains("-403")),
+        "{:?}",
+        f.detail
+    );
+    for bad in [
+        "bilibili:fav:777",
+        "bilibili:fav-public:",
+        "bilibili:fav-public:7a",
+    ] {
+        assert_eq!(
+            failure(favorites::public_list(&api, bad, None)).code,
+            ErrorCode::UnsupportedInput
+        );
+    }
+    assert!(server.requests().iter().all(|r| r.cookie().is_none()));
+}

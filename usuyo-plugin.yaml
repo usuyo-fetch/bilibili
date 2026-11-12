@@ -1,16 +1,15 @@
 # B站获取插件：列出你自己的收藏夹和稍后再看，按链接取单条，用于个人备份和离线阅读。
+# 几种方法各列一项（usuyo 协议 §2.3.1），没做的也列；行和 usuyo 仓库 docs/platforms/routes.md 第 5 节一一对应。
 protocol: 1
 id: usuyo-fetch/bilibili
 kind: fetch
 name: B站
-description: 列出我的收藏夹和稍后再看（用账号）；按视频链接取元数据、封面和低画质音视频（不用账号）
+description: 按视频链接取元数据、封面和低画质音视频（不用账号）；列公开的收藏夹（不用账号）；列我的收藏夹和稍后再看（用账号）
 version: 0.1.0
 license: MIT
 maintainers: [Fldicoahkiin]
 platforms: [bilibili]
 match: ["www.bilibili.com/video/*", "m.bilibili.com/video/*", "b23.tv/*"]
-access: session-api
-login: required
 sites:
   - site: www.bilibili.com
     name: B站
@@ -18,19 +17,65 @@ sites:
     loginUrl: https://passport.bilibili.com/login
     cookies: [SESSDATA]
     domains: [".bilibili.com"]
-capabilities:
-  fetch:
+methods:
+  - id: view
+    name: 公开接口
     access: public-web
     login: none
-    timeout: 30m
-    outputs: [text, images, media:video, media:audio, meta]
-  list:
+    account: none
+    risk:
+      text: 2026-06 起缺指纹参数的部分接口回 412
+      source: {label: "BiliNote #397", url: "https://github.com/JefferyHcool/BiliNote/issues/397"}
+    capabilities:
+      fetch:
+        timeout: 30m
+        outputs: [text, images, media:video, media:audio, meta]
+  - id: favorites-public
+    name: 公开收藏夹
+    access: public-web
+    login: none
+    account: none
+    risk:
+      text: 只有公开的收藏夹列得到；设成私密的和稍后再看要登录
+      source: {label: "usuyo platforms/routes.md 第 5 节", url: "https://github.com/usuyo/usuyo/blob/main/docs/platforms/routes.md#5-b站"}
+    capabilities:
+      # 2026-11-12 对一个公开收藏夹实测：一页里按收藏时间从旧到新，所以不说 newest-first
+      list:
+        order: unordered
+        link: 收藏夹或个人空间的链接
+  - id: favorites
+    name: 我的收藏夹和稍后再看
     access: session-api
     login: required
+    account: in-usuyo
     sites: [www.bilibili.com]
-    order: newest-first
-    sources:
-      - {source: "bilibili:toview", title: 稍后再看, action: favorite}
+    risk:
+      text: 一例大会员被冻结，因果不明
+      source: {label: "yutto #452", url: "https://github.com/yutto-dev/yutto/issues/452"}
+    capabilities:
+      list:
+        order: newest-first
+        sources:
+          - {source: "bilibili:toview", title: 稍后再看, action: favorite}
+  - id: userscript
+    name: 浏览器脚本
+    access: browser-session
+    login: required
+    account: own-browser
+    delivers: links
+    risk:
+      text: 同类脚本（X）调研里没有处罚记录；这个脚本还没在真浏览器里跑过
+      source: {label: "调研 06 §16.2", url: "https://github.com/usuyo/usuyo/blob/main/docs/research/06-platform-access-and-account-risk.md#162-issue-里的账号问题"}
+  - id: yutto
+    name: yutto（高清音视频、字幕）
+    built: false
+    access: session-api
+    login: required
+    account: in-usuyo
+    sites: [www.bilibili.com]
+    risk:
+      text: B站 2026 年给接口文档、SDK、下载器的维护者发律师函，点名登录态、签名鉴权的适配
+      source: {label: "调研 06 §16.3", url: "https://github.com/usuyo/usuyo/blob/main/docs/research/06-platform-access-and-account-risk.md#163-下架停更与法律风险"}
 pacing:
   bilibili: {batch: true, interval: 5s, daily: 500}
 permissions:

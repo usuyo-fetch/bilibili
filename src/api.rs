@@ -65,7 +65,16 @@ pub enum ApiError {
         path: String,
         source: std::io::Error,
     },
+    /// 接口回了，但不是能用的回答：带着回答的开头，宿主记进失败日志。
+    #[error("{error}")]
+    Answered {
+        error: Box<ApiError>,
+        answer: String,
+    },
 }
+
+/// 留给失败日志的回答开头最多多少字节。
+const ANSWER_BYTES: u64 = 4096;
 
 impl ApiError {
     /// 需要停下来报错的：网络、风控、限流、登录过期。其余的（找不到、格式变了、太大）
@@ -80,54 +89,75 @@ impl ApiError {
             | ApiError::ForbiddenHost(_)
             | ApiError::Refused(_)
             | ApiError::OutOfTime => false,
+            ApiError::Answered { error, .. } => error.is_hard(),
+        }
+    }
+
+    /// 接口回的 `code`（不是 0 时）。
+    pub fn code(&self) -> Option<i64> {
+        match self {
+            ApiError::Code { code, .. } => Some(*code),
+            ApiError::Answered { error, .. } => error.code(),
+            _ => None,
+        }
+    }
+
+    fn answered(self, raw: &[u8]) -> ApiError {
+        let end = raw.len().min(ANSWER_BYTES as usize);
+        ApiError::Answered {
+            error: Box::new(self),
+            answer: String::from_utf8_lossy(&raw[..end]).into_owned(),
         }
     }
 }
 
 impl From<ApiError> for CallFailure {
     fn from(err: ApiError) -> CallFailure {
-        let message = err.to_string();
-        let mut failure = match &err {
-            ApiError::Network(_) | ApiError::OutOfTime => {
-                CallFailure::new(ErrorCode::Network, message)
-            }
-            ApiError::Http {
-                status,
-                retry_after,
-            } => match status {
-                412 | 403 => blocked(message),
-                401 => login_required(message),
-                404 => CallFailure::new(ErrorCode::NotFound, message),
-                410 => not_found(message, NotFoundReason::Deleted),
-                429 => CallFailure {
-                    retry_after: *retry_after,
-                    ..CallFailure::new(ErrorCode::RateLimited, message)
-                },
-                500..=599 => CallFailure::new(ErrorCode::Network, message),
-                _ => CallFailure::new(ErrorCode::UpstreamChanged, message),
-            },
-            ApiError::Code { code, .. } => match code {
-                -412 | -352 => blocked(message),
-                -101 => login_required(message),
-                -404 => not_found(message, NotFoundReason::Deleted),
-                -403 | 62002 | 62012 => not_found(message, NotFoundReason::Private),
-                62004 | -400 => CallFailure::new(ErrorCode::NotFound, message),
-                -509 | -799 => CallFailure::new(ErrorCode::RateLimited, message),
-                _ => CallFailure::new(ErrorCode::UpstreamChanged, message),
-            },
-            ApiError::Shape(_)
-            | ApiError::TooLarge { .. }
-            | ApiError::ForbiddenHost(_)
-            | ApiError::Refused(_) => CallFailure::new(ErrorCode::UpstreamChanged, message),
-            ApiError::Credentials(_) | ApiError::Io { .. } => {
-                CallFailure::new(ErrorCode::Internal, message)
-            }
-        };
-        if failure.code == ErrorCode::RateLimited {
-            failure.hint = Some("B站提示请求太频繁，请过一会儿再试".into());
-        }
-        failure
+        failure(&err)
     }
+}
+
+fn failure(err: &ApiError) -> CallFailure {
+    let message = err.to_string();
+    let mut failure = match err {
+        ApiError::Network(_) | ApiError::OutOfTime => CallFailure::new(ErrorCode::Network, message),
+        ApiError::Http {
+            status,
+            retry_after,
+        } => match status {
+            412 | 403 => blocked(message),
+            401 => login_required(message),
+            404 => CallFailure::new(ErrorCode::NotFound, message),
+            410 => not_found(message, NotFoundReason::Deleted),
+            429 => CallFailure {
+                retry_after: *retry_after,
+                ..CallFailure::new(ErrorCode::RateLimited, message)
+            },
+            500..=599 => CallFailure::new(ErrorCode::Network, message),
+            _ => CallFailure::new(ErrorCode::UpstreamChanged, message),
+        },
+        ApiError::Code { code, .. } => match code {
+            -412 | -352 => blocked(message),
+            -101 => login_required(message),
+            -404 => not_found(message, NotFoundReason::Deleted),
+            -403 | 62002 | 62012 => not_found(message, NotFoundReason::Private),
+            62004 | -400 => CallFailure::new(ErrorCode::NotFound, message),
+            -509 | -799 => CallFailure::new(ErrorCode::RateLimited, message),
+            _ => CallFailure::new(ErrorCode::UpstreamChanged, message),
+        },
+        ApiError::Shape(_)
+        | ApiError::TooLarge { .. }
+        | ApiError::ForbiddenHost(_)
+        | ApiError::Refused(_) => CallFailure::new(ErrorCode::UpstreamChanged, message),
+        ApiError::Credentials(_) | ApiError::Io { .. } => {
+            CallFailure::new(ErrorCode::Internal, message)
+        }
+        ApiError::Answered { error, answer } => return failure(error).with_detail(answer),
+    };
+    if failure.code == ErrorCode::RateLimited {
+        failure.hint = Some("B站提示请求太频繁，请过一会儿再试".into());
+    }
+    failure
 }
 
 fn blocked(message: String) -> CallFailure {
@@ -373,29 +403,36 @@ impl Bilibili {
             request = request.cookie(&cookie);
         }
         let mut response = request.send().map_err(|e| self.out_of_time(transport(e)))?;
-        check_status(&response)?;
+        if let Err(e) = check_status(&response) {
+            // 状态不对时也留下回答的开头；读不出来就只报状态
+            let head = response.read_to_vec(ANSWER_BYTES).unwrap_or_default();
+            return Err(e.answered(&head));
+        }
         let raw = read_limited(&mut response, API_BYTES).map_err(|e| self.out_of_time(e))?;
         let wire: Wire = serde_json::from_slice(&raw).map_err(|e| {
             ApiError::Shape(format!(
                 "the body is not the expected JSON ({:?})",
                 e.classify()
             ))
+            .answered(&raw)
         })?;
         let code = wire
             .code
-            .ok_or_else(|| ApiError::Shape("the response has no `code`".into()))?;
+            .ok_or_else(|| ApiError::Shape("the response has no `code`".into()).answered(&raw))?;
         // 带 `v_voucher` 的响应是风控的验证要求，不管 code 是什么
         if code == -352 || !wire.data["v_voucher"].is_null() {
             return Err(ApiError::Code {
                 code: -352,
                 message: "risk control".into(),
-            });
+            }
+            .answered(&raw));
         }
         if code != 0 {
             return Err(ApiError::Code {
                 code,
                 message: wire.message.chars().take(MESSAGE_CHARS).collect(),
-            });
+            }
+            .answered(&raw));
         }
         Ok(Reply {
             data: wire.data,
