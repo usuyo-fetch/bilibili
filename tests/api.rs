@@ -467,6 +467,60 @@ fn optional_parts_that_fail_become_missing_not_errors() {
 }
 
 #[test]
+fn a_part_the_video_never_had_is_not_missing() {
+    // 没有封面：要了图片也不算缺
+    let server = Server::start(|req, base| match req.path.as_str() {
+        "/x/web-interface/view" => {
+            let mut resp = view_response(req, base);
+            resp.body = String::from_utf8(resp.body)
+                .unwrap()
+                .replace(&format!("{base}/img/cover.jpg"), "")
+                .into_bytes();
+            resp
+        }
+        _ => bilibili(req, base),
+    });
+    let tmp = tempfile::tempdir().unwrap();
+    let out = video::fetch(
+        &api_for(&server, None),
+        &video_url(BV),
+        tmp.path(),
+        Some(&[OutputKind::Text, OutputKind::Images]),
+    )
+    .unwrap();
+    assert_eq!(out.completeness, Completeness::Full);
+    assert!(out.missing.is_empty() && out.missing_reason.is_none());
+    assert!(out.images.is_empty());
+    assert!(!server.paths().iter().any(|p| p.contains("/img/")));
+
+    // 没有音轨的视频：DASH 里只有画面，要音频也不算缺
+    let silent = Server::start(|req, base| match req.path.as_str() {
+        "/x/player/playurl" => {
+            let mut resp = json_of("playurl.json", base);
+            let mut body: serde_json::Value = serde_json::from_slice(&resp.body).unwrap();
+            body["data"]["dash"]["audio"] = serde_json::json!([]);
+            resp.body = serde_json::to_vec(&body).unwrap();
+            resp
+        }
+        _ => bilibili(req, base),
+    });
+    let tmp = tempfile::tempdir().unwrap();
+    let out = video::fetch(
+        &api_for(&silent, None),
+        &video_url(BV),
+        tmp.path(),
+        Some(&[OutputKind::Video]),
+    )
+    .unwrap();
+    assert_eq!(out.completeness, Completeness::Full);
+    assert!(out.missing.is_empty() && out.missing_reason.is_none());
+    assert_eq!(
+        out.media.iter().map(|m| m.kind).collect::<Vec<_>>(),
+        [MediaKind::Video]
+    );
+}
+
+#[test]
 fn error_codes_are_mapped() {
     let server = Server::start(
         |req, base| match req.query.get("bvid").map(String::as_str) {

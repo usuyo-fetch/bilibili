@@ -209,7 +209,15 @@ pub fn fetch(
         credentials_update: None,
     };
 
-    if wanted.contains(&OutputKind::Images) {
+    // 这个视频本来没有的部分：没有的不算缺（协议 §3.7）。
+    // 文字有描述或标题就有；封面看 `pic`；音视频流看 playurl 的回答
+    let mut absent: BTreeSet<OutputKind> = BTreeSet::new();
+    if text.is_empty() {
+        absent.insert(OutputKind::Text);
+    }
+    if view.pic.trim().is_empty() {
+        absent.insert(OutputKind::Images);
+    } else if wanted.contains(&OutputKind::Images) {
         match cover(api, out, &view.pic) {
             Ok(path) => output.images.push(path),
             Err(e) => reasons.push(soft(e, "封面")?),
@@ -218,7 +226,7 @@ pub fn fetch(
 
     let want_video = wanted.contains(&OutputKind::Video);
     if wanted.contains(&OutputKind::Audio) {
-        match streams(api, out, &view, page, want_video, &mut output) {
+        match streams(api, out, &view, page, want_video, &mut output, &mut absent) {
             Ok(streams_meta) => meta["streams"] = streams_meta,
             Err(e) => reasons.push(soft(e, "音视频流")?),
         }
@@ -232,7 +240,12 @@ pub fn fetch(
     )?;
 
     let obtained = output.obtained();
-    output.missing = wanted.difference(&obtained).copied().collect();
+    // 缺的 = 这个视频有、想要、又没交来的
+    output.missing = wanted
+        .iter()
+        .filter(|kind| !absent.contains(kind) && !obtained.contains(kind))
+        .copied()
+        .collect();
     output.completeness = if output.missing.is_empty() {
         Completeness::Full
     } else {
@@ -289,7 +302,8 @@ fn cover(api: &Bilibili, out: &Path, pic: &str) -> Result<RelPath, ApiError> {
 
 /// 取低画质的 DASH 流：视频和音频是两个文件，这里不合并（合并由宿主的转换步骤做）。
 /// 两个都存了时带同一个 `group`（`cid:<cid>`），宿主据此知道它们是同一段的画面和音轨。
-/// 视频没要时只写音频。返回写进 `meta.json` 的说明。
+/// 视频没要时只写音频。playurl 的 DASH 里没有视频流或没有音频流的，记进 `absent`
+/// （这个视频本来没有，不算缺）。返回写进 `meta.json` 的说明。
 fn streams(
     api: &Bilibili,
     out: &Path,
@@ -297,6 +311,7 @@ fn streams(
     page: &Page,
     want_video: bool,
     output: &mut FetchOutput,
+    absent: &mut BTreeSet<OutputKind>,
 ) -> Result<Value, ApiError> {
     let aid = view.aid.to_string();
     let cid = page.cid.to_string();
@@ -325,13 +340,21 @@ fn streams(
         "note": "video 和 audio 是分开的两个文件（DASH 流），要合并后才能带声音播放；这里没有合并",
     });
     let duration = (page.duration > 0.0).then_some(page.duration);
-    let group = if want_video {
+    let has_video = want_video && !dash.video.is_empty();
+    let has_audio = !dash.audio.is_empty();
+    if want_video && !has_video {
+        absent.insert(OutputKind::Video);
+    }
+    if !has_audio {
+        absent.insert(OutputKind::Audio);
+    }
+    let group = if has_video && has_audio {
         Some(MediaGroup::try_from(format!("cid:{}", page.cid)).map_err(ApiError::Shape)?)
     } else {
         None
     };
 
-    if want_video {
+    if has_video {
         let stream = dash
             .video
             .iter()
@@ -360,11 +383,9 @@ fn streams(
         });
     }
 
-    let stream = dash
-        .audio
-        .iter()
-        .min_by_key(|s| (s.id, s.bandwidth))
-        .ok_or_else(|| ApiError::Shape("playurl has no audio stream".into()))?;
+    let Some(stream) = dash.audio.iter().min_by_key(|s| (s.id, s.bandwidth)) else {
+        return Ok(info);
+    };
     fetch_stream(
         api,
         out,
