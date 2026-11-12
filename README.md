@@ -1,6 +1,6 @@
 # usuyo-fetch/bilibili
 
-[usuyo](https://github.com/usuyo/usuyo) 的 B站获取插件。把你在 B站已经收下的内容（自己建的收藏夹、稍后再看）和单个视频，存到自己电脑上，用于个人备份和离线阅读。它是一个独立程序，按 usuyo 的插件协议（`docs/plugin-protocol.md`）和宿主对话，不依赖宿主的代码。
+[usuyo](https://github.com/usuyo/usuyo) 的 B站获取插件。把你在 B站已经收下的内容（自己建的收藏夹、稍后再看）和单个视频，存到自己电脑上，用于个人备份和离线阅读。它是一个独立程序，按 usuyo 的插件协议（`docs/protocol/`）和宿主对话，不依赖宿主的代码。
 
 ## 做什么
 
