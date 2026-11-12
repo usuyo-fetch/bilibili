@@ -13,6 +13,7 @@
 | `favorites` | `sources`：你自己的收藏夹和「稍后再看」，mid 取自 cookie `DedeUserID`；`list`：收藏夹按页码翻页，稍后再看一次给完，按加入时间从新到旧 | 在 usuyo 里登录的 B站 |
 | `userscript` | 不在插件里跑：`userscript/` 里的脚本在你的浏览器里把收藏夹、稍后再看交给 usuyo | 只在你的浏览器里 |
 | `yutto` | 还没做：包 yutto 取高清音视频和字幕 | 在 usuyo 里登录的 B站 |
+| `mediacrawler` | `list`：读你自己跑 MediaCrawler 留下的 B站视频文件（json 或 jsonl，或把 data 文件夹压成的 zip），每个视频列成一条链接（文件里的 av 号换成 BV 号），带标题、作者昵称、发布时间；不读评论、CSV、SQLite；`private-api`，默认关；已实现，只对着手写的文件测过，没有对着 MediaCrawler 真正的输出比对过 | 不用：文件是你自己用登录了账号的 MediaCrawler 跑出来的，这种方法不联网 |
 
 | 子命令 | 说明 |
 |---|---|

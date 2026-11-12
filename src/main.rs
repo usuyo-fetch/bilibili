@@ -6,7 +6,7 @@ use anyhow::Context;
 use serde::Serialize;
 use usuyo_fetch_bilibili::api::{Bilibili, Endpoints, SITE};
 use usuyo_fetch_bilibili::session::Session;
-use usuyo_fetch_bilibili::{canonical, favorites, video};
+use usuyo_fetch_bilibili::{canonical, favorites, mediacrawler, video};
 use usuyo_plugin_kit::fetch::{Call, USAGE};
 use usuyo_plugin_kit::protocol::{
     CallFailure, Envelope, ErrorCode, FetchHealth, LoginReport, LoginReportState,
@@ -66,6 +66,9 @@ fn run(args: &[String]) -> anyhow::Result<u8> {
             with_session()
                 .and_then(|api| favorites::list(&api, &source, cursor.as_deref(), since.as_ref())),
         ),
+        (Some("mediacrawler"), Call::List { source, cursor, .. }) => {
+            emit(mediacrawler::list_call(&source, cursor.as_deref()))
+        }
         (_, Call::Health { probe: false }) => emit(Ok(health(None))),
         (_, Call::Health { probe: true }) => {
             emit(with_session().and_then(|api| probe(&api)).map(health))

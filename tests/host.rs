@@ -237,7 +237,7 @@ async fn the_manifest_loads_and_matches_bilibili_links() {
     assert_eq!(plugin.id().as_str(), "usuyo-fetch/bilibili");
     assert_eq!(plugin.header.version.to_string(), env!("CARGO_PKG_VERSION"));
     let spec = &plugin.spec;
-    // routes.md 第 5 节的每一行（client-hook 那行在另一个组织），顺序照清单
+    // routes.md 第 5 节的每一行（client-hook 那行在另一个组织），加上 mediacrawler，顺序照清单
     let ids: Vec<&str> = spec.methods.iter().map(|m| m.id.as_str()).collect();
     assert_eq!(
         ids,
@@ -246,7 +246,8 @@ async fn the_manifest_loads_and_matches_bilibili_links() {
             "favorites-public",
             "favorites",
             "userscript",
-            "yutto"
+            "yutto",
+            "mediacrawler"
         ]
     );
     let view = spec.method("view").unwrap();
@@ -273,9 +274,10 @@ async fn the_manifest_loads_and_matches_bilibili_links() {
     );
     assert!(spec.method("userscript").unwrap().delivers.is_some());
     assert!(!spec.method("yutto").unwrap().built);
+    // 做了的方法里最高的一层：mediacrawler 是 private-api；登录要求仍是 favorites 的
     assert_eq!(
         (spec.access(), spec.login()),
-        (Access::SessionApi, Login::Required)
+        (Access::PrivateApi, Login::Required)
     );
     assert_eq!(plugin.spec.sites[0].cookies, ["SESSDATA"]);
     for hit in [

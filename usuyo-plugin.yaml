@@ -79,10 +79,24 @@ methods:
     capabilities:
       fetch:
         outputs: [media:video, media:audio, subtitle]
+  - id: mediacrawler
+    name: MediaCrawler 的结果文件
+    access: private-api
+    login: none
+    account: none
+    risk:
+      text: 文件是你自己用登录了你账号的 MediaCrawler 跑出来的；这种方法只读你交来的文件，不向任何平台发请求。记录到的封禁在 MediaCrawler 采集的那一侧（它的 issue 里有小红书账号被永久封禁的报告）
+      source: {label: "MediaCrawler #865", url: "https://github.com/NanmiCoder/MediaCrawler/issues/865"}
+    capabilities:
+      list:
+        order: unordered
+        files: ["*.json", "*.jsonl", "*.zip"]
+        reads: MediaCrawler 保存成 json 或 jsonl 的B站帖子文件（名字里带 contents；评论文件、CSV、SQLite 不读），或把 data 文件夹压成的 zip
 pacing:
   bilibili: {batch: true, interval: 5s, daily: 500}
 permissions:
   fs:
+    read: ["${INPUT}"]
     write: ["${OUT}"]
   network:
     mode: allowlist
