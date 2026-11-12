@@ -181,14 +181,6 @@ fn each_call_goes_to_its_method() {
             "--method",
             "favorites",
         ][..],
-        &[
-            "fetch",
-            "https://www.bilibili.com/video/BV17x411w7KC",
-            "--out",
-            "/o",
-            "--method",
-            "yutto",
-        ][..],
     ] {
         let (code, out) = run(args, &[]);
         assert_eq!(
@@ -273,7 +265,18 @@ async fn the_manifest_loads_and_matches_bilibili_links() {
         ListOrder::NewestFirst
     );
     assert!(spec.method("userscript").unwrap().delivers.is_some());
-    assert!(!spec.method("yutto").unwrap().built);
+    let yutto = spec.method("yutto").unwrap();
+    assert!(yutto.built && yutto.capabilities.fetch.is_some());
+    assert_eq!(
+        (yutto.access, yutto.login, yutto.account),
+        (Access::SessionApi, Login::Required, Account::InUsuyo)
+    );
+    assert_eq!(yutto.sites, ["www.bilibili.com"]);
+    // session-api 默认开着（宿主只默认关 private-api、client-hook）
+    assert!(yutto.on_by_default());
+    // 只有 yutto 再起程序；它们不在 requires.runtime 里，缺了不挡别的方法
+    assert_eq!(plugin.header.permissions.exec, ["yutto", "ffmpeg"]);
+    assert!(plugin.header.runtime.is_empty());
     // 做了的方法里最高的一层：mediacrawler 是 private-api；登录要求仍是 favorites 的
     assert_eq!(
         (spec.access(), spec.login()),

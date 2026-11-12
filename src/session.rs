@@ -50,6 +50,7 @@ fn session_cookie() -> f64 {
 /// 一次调用里用到的登录态。
 pub struct Session {
     cookie_header: String,
+    sessdata: String,
     user_id: Option<String>,
 }
 
@@ -94,7 +95,7 @@ impl Session {
         })?;
         let mut pairs = Vec::new();
         let mut user_id = None;
-        let mut has_session = false;
+        let mut sessdata: Option<String> = None;
         for cookie in credentials.storage_state.cookies {
             let domain = cookie.domain.trim_start_matches('.').to_ascii_lowercase();
             let on_site = domain == "bilibili.com" || domain.ends_with(".bilibili.com");
@@ -106,7 +107,7 @@ impl Session {
                 continue;
             }
             match cookie.name.as_str() {
-                SESSION_COOKIE => has_session = true,
+                SESSION_COOKIE => sessdata = Some(cookie.value.clone()),
                 USER_ID_COOKIE => {
                     user_id = (cookie.value.bytes().all(|b| b.is_ascii_digit())
                         && cookie.value.len() <= 20)
@@ -116,8 +117,9 @@ impl Session {
             }
             pairs.push(format!("{}={}", cookie.name, cookie.value));
         }
-        Ok(has_session.then(|| Session {
+        Ok(sessdata.map(|sessdata| Session {
             cookie_header: pairs.join("; "),
+            sessdata,
             user_id,
         }))
     }
@@ -125,6 +127,11 @@ impl Session {
     /// 只给发往 B站 API 的请求用。
     pub fn cookie_header(&self) -> &str {
         &self.cookie_header
+    }
+
+    /// `SESSDATA` 的值，只给 yutto 的认证文件用（`yutto.rs`）：不进参数、日志和错误。
+    pub fn sessdata(&self) -> &str {
+        &self.sessdata
     }
 
     /// `DedeUserID`，我自己的 mid。

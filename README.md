@@ -12,13 +12,13 @@
 | `favorites-public` | `sources --link`：你给一个人的个人空间（`space.bilibili.com/<mid>`）就列他公开的收藏夹，给一个收藏夹的链接就是它；`list`：翻一个公开收藏夹，一页 20 条，`actedAt` 是收藏时间；2026-11-12 实测一页里从旧到新，清单写 `unordered` | 不用 |
 | `favorites` | `sources`：你自己的收藏夹和「稍后再看」，mid 取自 cookie `DedeUserID`；`list`：收藏夹按页码翻页，稍后再看一次给完，按加入时间从新到旧 | 在 usuyo 里登录的 B站 |
 | `userscript` | 不在插件里跑：`userscript/` 里的脚本在你的浏览器里把收藏夹、稍后再看交给 usuyo | 只在你的浏览器里 |
-| `yutto` | 还没做：包 yutto 取高清音视频和字幕 | 在 usuyo 里登录的 B站 |
+| `yutto` | `fetch`：包你自己装的 yutto（GPL-3.0，独立进程，插件不带、不下载、不链接它），取高画质的画面、声音和字幕；`session-api`，默认开着，要等登录以后才用得上；已实现，只对着假的 yutto 测过，没有对着真的 yutto 和 B站 跑过；见下面「yutto」 | 在 usuyo 里登录的 B站 |
 | `mediacrawler` | `list`：读你自己跑 MediaCrawler 留下的 B站视频文件（json 或 jsonl，或把 data 文件夹压成的 zip），每个视频列成一条链接（文件里的 av 号换成 BV 号），带标题、作者昵称、发布时间；不读评论、CSV、SQLite；`private-api`，默认关；已实现，只对着手写的文件测过，没有对着 MediaCrawler 真正的输出比对过 | 不用：文件是你自己用登录了账号的 MediaCrawler 跑出来的，这种方法不联网 |
 
 | 子命令 | 说明 |
 |---|---|
 | `canonicalize` | 认出 BV 号、av 号、`b23.tv` 短链和分 P（`BV…:p2`）。av 号离线换成 BV 号；只有短链会发请求，只跟随重定向，不带 cookie。不分方法 |
-| `health` | 不发请求；`--probe` 才用登录信息请求一次 `nav` |
+| `health` | 不发请求，只看本机：yutto 和 ffmpeg 找没找到、版本够不够（没过只挡方法 `yutto`，别的方法照用）；`--probe` 才用登录信息请求一次 `nav` |
 
 `fetch` 的输出目录：
 
@@ -34,14 +34,42 @@ media/audio.m4s            音频流
 
 错误码：`-412`、`-352`（以及 HTTP 412、响应里带 `v_voucher`）回 `blocked`，`-101` 回 `login-required`，`-799`、`-509`、HTTP 429 回 `rate-limited`。
 
+## yutto
+
+方法 `yutto` 用的程序是你自己装的，插件不带、不下载、不安装它们，只按名字在 `PATH` 和 `/opt/homebrew/bin`、`/usr/local/bin` 里找：
+
+- yutto 2.3.1 以上：`uv tool install yutto`（来源：[yutto](https://github.com/yutto-dev/yutto)，GPL-3.0，插件只把它当独立程序起一个进程）。
+- ffmpeg：macOS 上 `brew install ffmpeg`。yutto 每次都用它把流封成 `mp4`、`m4a`。
+
+没装或版本不够时 `health` 里对应的检查不过，写着安装的命令，只有方法 `yutto` 用不了；`fetch` 回 `dependency-missing`，`needs` 是 `runtime:yutto`、`runtime:ffmpeg`。清单里它们写在 `permissions.exec`，不写 `requires.runtime`：后者缺了宿主整个插件都不调，别的方法用不着它们。
+
+登录：宿主只在这次调用里交来你登录 B站的凭据（`USUYO_CREDENTIALS`）。插件把 `SESSDATA` 写进这次调用工作目录里一个 0600 的 yutto 认证文件（`--auth-file`），用完马上删，出错也删；它不进 yutto 的参数和环境，不进日志、错误和 `detail`（交出去的文字里出现它的原样、百分号编码、解码三种写法都先换掉）。没有登录时不起 yutto，回 `login-required`。
+
+每次调用：
+
+```
+yutto <规范链接> --video-only | --audio-only | --subtitle-only [--no-subtitle]
+  --no-danmaku --no-cover --no-chapter-info --no-progress --no-color --login-strict
+  -d <调用目录>/out --tmp-dir <调用目录>/tmp -tp item
+  --auth-file <工作目录>/auth.toml --auth-profile default --proxy <宿主的代理或 no> --ffmpeg-path <ffmpeg>
+```
+
+- 画面、声音分两次，字幕跟在第一次里一起写（只要字幕时单独一次 `--subtitle-only`）；没有字幕的视频不算缺。
+- 环境先清空；`HOME`、`XDG_CONFIG_HOME` 指到工作目录里的空目录，当前目录里没有 `yutto.toml`，读不到你自己的 yutto 配置。代理只用宿主给的（`USUYO_PROXY`，`socks5://` 改写成 `socks5h://`），没有就直连（`--proxy no`），不让 yutto 去读系统代理。
+- 上限：每个文件至多 2 GiB（调用目录里任何一个文件超过就杀掉 yutto，缺的写进 `missing`），整次 55 分钟，yutto 的输出只留开头 64 KiB。
+- 输出：`media/video.mp4`、`media/audio.m4a`、`media/subtitle.<语言>.srt`，名字固定；两个流都有时带同一个 `group`（`yutto:<BV>:p<分 P>`）。没有标题、作者一类，那些由 `view` 方法给。
+- 错误：照 yutto 的退出码（10 HTTP 状态、11 没有权限、12 和 14 链接不对、15 和 17 找不到、16 重试用尽、18 没登录、20 合成失败）和输出里的字样；认不出的回 `upstream-changed`，提示更新 yutto。
+
+测试用假的 yutto 和 ffmpeg（sh 脚本），夹具在 `tests/fixtures/yutto/`，都是手写的、没有测过（NOT MEASURED）。没有运行过真的 yutto，也没有向 B站发过请求。
+
 ## 不做什么
 
 - 点赞列表、评论、弹幕。
-- 字幕：要登录才取得到，`fetch` 不用账号，所以不给；语音转文字由 usuyo 自己做。
-- 高清画质：始终选能拿到的最低画质，不碰需要签名的接口。
+- 字幕：`view` 方法不用账号，所以不给；要字幕用 `yutto` 方法。语音转文字由 usuyo 自己做。
+- 高清画质：`view` 方法始终选能拿到的最低画质，不碰需要签名的接口；高画质交给 `yutto` 方法。
 - 番剧、直播、音频区、订阅的合集。
 - 登录：登录窗口和 cookie 由宿主管，插件只读宿主交来的 `USUYO_CREDENTIALS`。插件不读浏览器的 cookie 库，不保存、不打印 cookie 的值，不调 cookie 刷新接口，不带 `bili_jct`。
-- cookie 只用于 `sources` 和 `list`，只发往 `api.bilibili.com`；`fetch`、`canonicalize` 不带 cookie，封面和视频流的请求也不带，并且只连 `*.hdslb.com`、`*.bilivideo.com`、`*.bilivideo.cn`。
+- cookie 只用于 `sources` 和 `list`，只发往 `api.bilibili.com`；`view` 的 `fetch`、`canonicalize` 不带 cookie，封面和视频流的请求也不带，并且只连 `*.hdslb.com`、`*.bilivideo.com`、`*.bilivideo.cn`；`yutto` 方法的登录只交给 yutto 的认证文件（见下面「yutto」）。
 
 ## 节奏
 

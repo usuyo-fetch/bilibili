@@ -66,9 +66,10 @@ methods:
     risk:
       text: 同类脚本（X）调研里没有处罚记录；这个脚本还没在真浏览器里跑过
       source: {label: "调研 06 §16.2", url: "https://github.com/usuyo/usuyo/blob/main/docs/research/06-platform-access-and-account-risk.md#162-issue-里的账号问题"}
+  # 包你自己装的 yutto（GPL-3.0，独立进程，插件不带、不下载它）；用宿主交来的 B站登录，写进只有这次调用能读的
+  # 临时认证文件，用完删掉。画面、声音分两次取，字幕跟在第一次里；层级和默认开着照 routes.md 第 5 节的 session-api
   - id: yutto
     name: yutto（高清音视频、字幕）
-    built: false
     access: session-api
     login: required
     account: in-usuyo
@@ -78,6 +79,7 @@ methods:
       source: {label: "调研 06 §16.3", url: "https://github.com/usuyo/usuyo/blob/main/docs/research/06-platform-access-and-account-risk.md#163-下架停更与法律风险"}
     capabilities:
       fetch:
+        timeout: 1h
         outputs: [media:video, media:audio, subtitle]
   - id: mediacrawler
     name: MediaCrawler 的结果文件
@@ -95,11 +97,15 @@ methods:
 pacing:
   bilibili: {batch: true, interval: 5s, daily: 500}
 permissions:
+  # 只有方法 yutto 要再起程序：yutto，和它用来把流封成 mp4、m4a 的 ffmpeg。不写进 requires.runtime：缺了它们宿主会
+  # 整个插件都不调，别的方法用不着它们；缺了由 health 的检查只挡方法 yutto（协议 §3.10），版本要求也在那里查
+  exec: [yutto, ffmpeg]
   fs:
     read: ["${INPUT}"]
     write: ["${OUT}"]
   network:
     mode: allowlist
-    hosts: ["api.bilibili.com", "b23.tv", "*.bilivideo.com", "*.bilivideo.cn", "*.hdslb.com"]
+    # yutto 连的主机（推断，照 usuyo plugin try 打印的被拦主机补）
+    hosts: ["api.bilibili.com", "www.bilibili.com", "b23.tv", "*.bilivideo.com", "*.bilivideo.cn", "*.hdslb.com"]
 run:
   command: ["${PLUGIN_DIR}/usuyo-fetch-bilibili"]

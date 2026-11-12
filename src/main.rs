@@ -6,7 +6,8 @@ use anyhow::Context;
 use serde::Serialize;
 use usuyo_fetch_bilibili::api::{Bilibili, Endpoints, SITE};
 use usuyo_fetch_bilibili::session::Session;
-use usuyo_fetch_bilibili::{canonical, favorites, mediacrawler, video};
+use usuyo_fetch_bilibili::tools::Search;
+use usuyo_fetch_bilibili::{canonical, favorites, mediacrawler, video, yutto};
 use usuyo_plugin_kit::fetch::{Call, USAGE};
 use usuyo_plugin_kit::protocol::{
     CallFailure, Envelope, ErrorCode, FetchHealth, LoginReport, LoginReportState,
@@ -24,7 +25,7 @@ fn main() -> ExitCode {
 }
 
 /// 分派到清单里的方法：`view` 取单条，`favorites-public` 列公开收藏夹（不带 cookie），
-/// `favorites` 列我的收藏夹和稍后再看（带 cookie）。浏览器脚本不在这里跑，`yutto` 还没做。
+/// `favorites` 列我的收藏夹和稍后再看（带 cookie）。`yutto` 包你自己装的 yutto（带 cookie 登录，凭据只交给它的认证文件）。浏览器脚本不在这里跑。
 fn run(args: &[String]) -> anyhow::Result<u8> {
     let anonymous = || Bilibili::new(Endpoints::production(), None);
     let with_session = || -> Result<Bilibili, CallFailure> {
@@ -42,6 +43,25 @@ fn run(args: &[String]) -> anyhow::Result<u8> {
                 input, out, want, ..
             },
         ) => emit(video::fetch(&anonymous(), &input, &out, want.as_deref())),
+        (
+            Some(yutto::METHOD),
+            Call::Fetch {
+                input, out, want, ..
+            },
+        ) => emit(
+            Session::from_env()
+                .map_err(CallFailure::from)
+                .and_then(|session| {
+                    yutto::fetch(
+                        &anonymous(),
+                        &yutto::Context::from_env(),
+                        session.as_ref(),
+                        &input,
+                        &out,
+                        want.as_deref(),
+                    )
+                }),
+        ),
         (
             Some("favorites-public"),
             Call::Sources {
@@ -115,12 +135,13 @@ fn probe(api: &Bilibili) -> Result<Option<LoginReportState>, CallFailure> {
 }
 
 /// 登录状态（`present`、`missing`、`expired`）由宿主按 `sites.cookies` 算，
-/// 这里只在 `--probe` 核对过以后报 `verified` 或 `rejected`。没有要查的本机程序。
+/// 这里只在 `--probe` 核对过以后报 `verified` 或 `rejected`。本机程序只有方法 `yutto` 用的 yutto 和 ffmpeg，
+/// 没过只挡这一种方法。
 fn health(probed: Option<LoginReportState>) -> FetchHealth {
     let mut h = FetchHealth::new(env!("CARGO_PKG_VERSION"));
     h.login.extend(probed.map(|state| LoginReport {
         site: SITE.into(),
         state,
     }));
-    h
+    yutto::add_checks(h, &Search::from_env())
 }
