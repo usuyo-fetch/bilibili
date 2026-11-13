@@ -63,6 +63,7 @@ methods:
     login: required
     account: own-browser
     delivers: links
+    script: userscript/usuyo-bilibili-saved.user.js
     risk:
       text: 同类脚本（X）调研里没有处罚记录；这个脚本还没在真浏览器里跑过
       source: {label: "调研 06 §16.2", url: "https://github.com/usuyo/usuyo/blob/main/docs/research/06-platform-access-and-account-risk.md#162-issue-里的账号问题"}
