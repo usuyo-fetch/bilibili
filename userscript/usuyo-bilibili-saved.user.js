@@ -25,7 +25,7 @@
  * 这两个的回答形状没有在有账号的页面上量过，是照 SocialSisterYi/bilibili-API-collect 的接口笔记
  * （该仓库 2026-01 已停止维护并删除文档）写的，字段名都按「有就用、没有就跳过」处理。
  *
- * 交给 usuyo 的部分（握手、令牌、只连 127.0.0.1:47615）原样照 usuyo-fetch/xiaohongshu 的
+ * 交给 usuyo 的部分（握手、令牌、只连 127.0.0.1:47615）原样照 usuyo-fetch/rednote 的
  * userscript/usuyo-xhs-saved.user.js 0.3.0：经脚本管理器的 GM_xmlhttpRequest；先握手确认对面是 usuyo，
  * 核对不过就什么都不发，投递令牌只在核对过以后才放进请求头。
  *
