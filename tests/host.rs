@@ -229,19 +229,9 @@ async fn the_manifest_loads_and_matches_bilibili_links() {
     assert_eq!(plugin.id().as_str(), "usuyo-fetch/bilibili");
     assert_eq!(plugin.header.version.to_string(), env!("CARGO_PKG_VERSION"));
     let spec = &plugin.spec;
-    // routes.md 第 5 节的每一行（client-hook 那行在另一个组织），加上 mediacrawler，顺序照清单
+    // routes.md 第 5 节的每一行（client-hook 那行在另一个组织），顺序照清单
     let ids: Vec<&str> = spec.methods.iter().map(|m| m.id.as_str()).collect();
-    assert_eq!(
-        ids,
-        [
-            "view",
-            "favorites-public",
-            "favorites",
-            "userscript",
-            "yutto",
-            "mediacrawler"
-        ]
-    );
+    assert_eq!(ids, ["view", "favorites-public", "favorites", "userscript"]);
     let view = spec.method("view").unwrap();
     assert_eq!(
         (view.access, view.login, view.account),
@@ -265,22 +255,12 @@ async fn the_manifest_loads_and_matches_bilibili_links() {
         ListOrder::NewestFirst
     );
     assert!(spec.method("userscript").unwrap().delivers.is_some());
-    let yutto = spec.method("yutto").unwrap();
-    assert!(yutto.built && yutto.capabilities.fetch.is_some());
-    assert_eq!(
-        (yutto.access, yutto.login, yutto.account),
-        (Access::SessionApi, Login::Required, Account::InUsuyo)
-    );
-    assert_eq!(yutto.sites, ["www.bilibili.com"]);
-    // session-api 默认开着（宿主只默认关 private-api、client-hook）
-    assert!(yutto.on_by_default());
-    // 只有 yutto 再起程序；它们不在 requires.runtime 里，缺了不挡别的方法
-    assert_eq!(plugin.header.permissions.exec, ["yutto", "ffmpeg"]);
+    assert!(plugin.header.permissions.exec.is_empty());
     assert!(plugin.header.runtime.is_empty());
-    // 做了的方法里最高的一层：mediacrawler 是 private-api；登录要求仍是 favorites 的
+    // 做了的方法里最高的一层是 session-api（favorites）
     assert_eq!(
         (spec.access(), spec.login()),
-        (Access::PrivateApi, Login::Required)
+        (Access::SessionApi, Login::Required)
     );
     assert_eq!(plugin.spec.sites[0].cookies, ["SESSDATA"]);
     for hit in [

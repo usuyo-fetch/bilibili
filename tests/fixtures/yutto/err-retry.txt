@@ -1,3 +1,0 @@
-16
-NOT MEASURED, hand-written.
-ERROR 重试次数过多，proxy __PROXY__ 不可用

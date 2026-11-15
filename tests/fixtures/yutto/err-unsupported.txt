@@ -1,3 +1,0 @@
-12
-NOT MEASURED, hand-written.
-ERROR 不支持的链接类型
