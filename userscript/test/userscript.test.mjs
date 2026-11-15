@@ -719,7 +719,7 @@ test('a quiet page says so once, calmly, and only until a list answer is recogni
 test('the version is bumped and the diagnosis code is the same in all three scripts', () => {
   assert.match(SCRIPT_TEXT, /^\/\/ @version      0\.2\.0$/m);
   assert.ok(SCRIPT_TEXT.includes("const VERSION = '0.2.0';"));
-  for (const sibling of ['../../../x/userscript/usuyo-x-saved.user.js', '../../../xiaohongshu/userscript/usuyo-xhs-saved.user.js']) {
+  for (const sibling of ['../../../x/userscript/usuyo-x-saved.user.js', '../../../rednote/userscript/usuyo-xhs-saved.user.js']) {
     const url = new URL(sibling, import.meta.url);
     assert.ok(existsSync(url), 'sibling script is expected at ' + url.pathname);
     assert.equal(diagBlock(SCRIPT_TEXT), diagBlock(readFileSync(url, 'utf8')));

@@ -21,13 +21,13 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.154", features = ["raw_value"] }
 thiserror = "2.0.21"
 url = "2.5.8"
-usuyo-plugin-kit = { version = "0.0.0", path = "../../usuyo/crates/usuyo-plugin-kit" }
+usuyo-plugin-kit = { version = "0.0.0", git = "https://github.com/usuyo/usuyo", rev = "252ffd311302b5ec8cb1577d102a1c2c872bddd9" }
 zip = { version = "9.5.1", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
 [dev-dependencies]
 tempfile = "3.27.0"
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros"] }
-usuyo-plugin = { path = "../../usuyo/crates/usuyo-plugin" }
+usuyo-plugin = { git = "https://github.com/usuyo/usuyo", rev = "252ffd311302b5ec8cb1577d102a1c2c872bddd9" }
 
 [lints.rust]
 unsafe_code = "forbid"

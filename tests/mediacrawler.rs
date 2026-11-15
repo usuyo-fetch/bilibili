@@ -550,7 +550,7 @@ fn host() -> (tempfile::TempDir, PluginHost) {
         HostConfig {
             work_dir: tmp.path().join("work"),
             cache_dir: tmp.path().join("cache"),
-            locale: "zh-CN".into(),
+            locale: usuyo_plugin::Locale::new("zh-CN"),
             limits: CallLimits::default(),
         },
         found.fetch,

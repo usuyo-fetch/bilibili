@@ -1,0 +1,12 @@
+# 推 v<version> 的 tag 时发版：调用 usuyo-fetch/index 里的可复用工作流，为四个目标编译、打包、发 release。
+name: release
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: read
+jobs:
+  release:
+    permissions:
+      contents: write
+    uses: usuyo-fetch/index/.github/workflows/release-plugin.yml@main
