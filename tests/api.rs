@@ -382,7 +382,11 @@ fn want_limits_what_is_fetched() {
     assert_eq!(out.completeness, Completeness::Full);
     assert_eq!(files(tmp.path()), ["meta.json", "view.json"]);
     assert!(out.images.is_empty() && out.media.is_empty());
-    assert_eq!(server.paths(), ["/x/web-interface/view"]);
+    // 假服务器上没有视频页（404）：只补一次 view 接口
+    assert_eq!(
+        server.paths(),
+        [format!("/video/{BV}/"), "/x/web-interface/view".into()]
+    );
 
     // 要视频就一起写音频
     let tmp = tempfile::tempdir().unwrap();
@@ -401,7 +405,10 @@ fn want_limits_what_is_fetched() {
     // 只有音轨时没有要配的另一半
     assert!(out.media[0].group.is_none());
     let later: Vec<_> = server.paths().split_off(before);
-    assert!(!later.iter().any(|p| p.contains("video")), "{later:?}");
+    assert!(
+        !later.iter().any(|p| p.starts_with("/cdn/video")),
+        "{later:?}"
+    );
 
     let tmp = tempfile::tempdir().unwrap();
     let bad = failure(video::fetch(
@@ -989,6 +996,196 @@ fn slow_steps_stop_at_the_call_budget_and_keep_the_metadata() {
         );
         let reason = out.missing_reason.unwrap();
         assert!(reason.contains("time budget"), "{budget}: {reason}");
+    }
+}
+
+/// 手写的视频页：只有 yt-dlp 读的那几段脚本。`state`、`play` 为假时不写那一段；
+/// 视频信息照 `view.json` 的 `data`，流照 `playurl.json`，后面跟着页面自己的脚本。
+fn video_page(base: &str, state: bool, play: bool) -> String {
+    let view: serde_json::Value = serde_json::from_str(&fixture("view.json", base)).unwrap();
+    let mut html = String::from("<!DOCTYPE html><html><head><title>t</title>");
+    if play {
+        html.push_str(&format!(
+            "<script>window.__playinfo__={}</script>",
+            fixture("playurl.json", base).replace('\n', "")
+        ));
+    }
+    html.push_str("</head><body><div id=\"app\"></div>");
+    if state {
+        html.push_str(&format!(
+            "<script>window.__INITIAL_STATE__ = {};(function(){{var s;(s=document.currentScript||document.scripts[document.scripts.length-1]).parentNode.removeChild(s);}}());</script>",
+            serde_json::json!({"aid": 170001, "bvid": BV, "videoData": view["data"], "upData": {"mid": "122541"}, "error": {}})
+        ));
+    }
+    html.push_str("</body></html>");
+    html
+}
+
+fn html(body: String) -> Response {
+    Response {
+        status: 200,
+        headers: vec![("Content-Type", "text/html; charset=utf-8".into())],
+        body: body.into_bytes(),
+    }
+}
+
+fn meta_of(dir: &Path) -> serde_json::Value {
+    serde_json::from_slice(&std::fs::read(dir.join("meta.json")).unwrap()).unwrap()
+}
+
+#[test]
+fn the_video_page_gives_both_halves_without_cookies() {
+    let server = Server::start(|req, base| match req.path.as_str() {
+        p if p == format!("/video/{BV}/") => html(video_page(base, true, true)),
+        _ => bilibili(req, base),
+    });
+    // 就算手里有登录信息，视频页也不带 cookie
+    let api = api_for(&server, Some(session()));
+    let tmp = tempfile::tempdir().unwrap();
+    let out = video::fetch(&api, &video_url(BV), tmp.path(), None).unwrap();
+
+    assert_eq!(out.title.as_deref(), Some("【MV】保加利亚妖王AZIS视频合辑"));
+    assert_eq!(out.completeness, Completeness::Full);
+    // 流的挑法照旧：AVC 里最低的那一路、最低的音频
+    assert_eq!(
+        std::fs::read(tmp.path().join("media/video.m4s")).unwrap(),
+        b"VIDEO32"
+    );
+    assert_eq!(
+        std::fs::read(tmp.path().join("media/audio.m4s")).unwrap(),
+        b"AUDIO64"
+    );
+    assert_eq!(
+        files(tmp.path()),
+        [
+            "images/cover.jpg",
+            "media/audio.m4s",
+            "media/video.m4s",
+            "meta.json",
+            "view.json"
+        ]
+    );
+    let meta = meta_of(tmp.path());
+    assert_eq!(
+        meta["stage"],
+        serde_json::json!({"view": "video-page", "streams": "video-page"})
+    );
+    assert_eq!(meta["cid"], 279786);
+    // 页面那一路的 view.json 是 `videoData` 本身
+    let view: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(tmp.path().join("view.json")).unwrap()).unwrap();
+    assert_eq!(view["aid"], 170001);
+
+    let requests = server.requests();
+    assert_eq!(requests[0].path, format!("/video/{BV}/"));
+    assert!(requests[0].query.is_empty());
+    assert!(requests.iter().all(|r| r.cookie().is_none()));
+    // 两半都读到了：一个接口都不调
+    assert!(
+        !server.paths().iter().any(|p| p.starts_with("/x/")),
+        "{:?}",
+        server.paths()
+    );
+}
+
+#[test]
+fn a_part_asks_the_page_with_p() {
+    let server = Server::start(|req, base| match req.path.as_str() {
+        p if p == format!("/video/{BV}/") => html(video_page(base, true, false)),
+        _ => bilibili(req, base),
+    });
+    let tmp = tempfile::tempdir().unwrap();
+    let out = video::fetch(
+        &api_for(&server, None),
+        &format!("{}?p=2", video_url(BV)),
+        tmp.path(),
+        Some(&[OutputKind::Text, OutputKind::Meta]),
+    )
+    .unwrap();
+    assert_eq!(content_id(&out.identity), format!("{BV}:p2"));
+    assert_eq!(server.requests()[0].query["p"], "2");
+    assert_eq!(meta_of(tmp.path())["cid"], 275431);
+    assert_eq!(server.paths().len(), 1);
+}
+
+#[test]
+fn the_half_the_page_lacks_comes_from_the_api() {
+    // 页面只有视频信息：流地址调 playurl，不调 view
+    let server = Server::start(|req, base| match req.path.as_str() {
+        p if p == format!("/video/{BV}/") => html(video_page(base, true, false)),
+        _ => bilibili(req, base),
+    });
+    let tmp = tempfile::tempdir().unwrap();
+    let out = video::fetch(&api_for(&server, None), &video_url(BV), tmp.path(), None).unwrap();
+    assert_eq!(out.completeness, Completeness::Full);
+    assert_eq!(
+        meta_of(tmp.path())["stage"],
+        serde_json::json!({"view": "video-page", "streams": "api"})
+    );
+    let paths = server.paths();
+    assert!(paths.contains(&"/x/player/playurl".to_owned()));
+    assert!(!paths.contains(&"/x/web-interface/view".to_owned()));
+
+    // 页面只有流地址：视频信息调 view，不调 playurl
+    let server = Server::start(|req, base| match req.path.as_str() {
+        p if p == format!("/video/{BV}/") => html(video_page(base, false, true)),
+        _ => bilibili(req, base),
+    });
+    let tmp = tempfile::tempdir().unwrap();
+    let out = video::fetch(&api_for(&server, None), &video_url(BV), tmp.path(), None).unwrap();
+    assert_eq!(out.completeness, Completeness::Full);
+    assert_eq!(
+        meta_of(tmp.path())["stage"],
+        serde_json::json!({"view": "api", "streams": "video-page"})
+    );
+    let paths = server.paths();
+    assert!(paths.contains(&"/x/web-interface/view".to_owned()));
+    assert!(!paths.contains(&"/x/player/playurl".to_owned()));
+    // 接口那一路的 view.json 是 view 接口的整个响应
+    let view: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(tmp.path().join("view.json")).unwrap()).unwrap();
+    assert_eq!(view["data"]["aid"], 170001);
+
+    // 跳走的页面不跟，两半都由接口取
+    let server = Server::start(|req, base| match req.path.as_str() {
+        p if p.starts_with("/video/") => Response::redirect("https://www.bilibili.com/festival/x"),
+        _ => bilibili(req, base),
+    });
+    let tmp = tempfile::tempdir().unwrap();
+    video::fetch(&api_for(&server, None), &video_url(BV), tmp.path(), None).unwrap();
+    assert_eq!(
+        meta_of(tmp.path())["stage"],
+        serde_json::json!({"view": "api", "streams": "api"})
+    );
+    assert!(!server.paths().iter().any(|p| p.contains("festival")));
+}
+
+#[test]
+fn a_risk_page_stops_without_calling_the_api() {
+    for page in [
+        Response::status(412),
+        // 照 yt-dlp：风控页上没有视频信息，只有 `window._riskdata_` 带着 `v_voucher`
+        html(
+            "<html><script>window._riskdata_ = {\"v_voucher\":\"voucher_x\"};</script></html>"
+                .into(),
+        ),
+    ] {
+        let page = std::sync::Mutex::new(Some(page));
+        let server = Server::start(move |req, base| match req.path.as_str() {
+            p if p.starts_with("/video/") => page.lock().unwrap().take().unwrap(),
+            _ => bilibili(req, base),
+        });
+        let tmp = tempfile::tempdir().unwrap();
+        let f = failure(video::fetch(
+            &api_for(&server, None),
+            &video_url(BV),
+            tmp.path(),
+            None,
+        ));
+        assert_eq!(f.code, ErrorCode::Blocked, "{f}");
+        assert_eq!(f.site.as_deref(), Some(SITE));
+        assert!(files(tmp.path()).is_empty());
+        assert_eq!(server.paths().len(), 1, "{:?}", server.paths());
     }
 }
 

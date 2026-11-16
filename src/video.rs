@@ -1,8 +1,12 @@
 //! `fetch`：一个视频的元数据、封面，和按需要的低画质音视频流。不带账号：
 //! 这里的请求都不带 cookie，也不读宿主交来的凭据。
 //!
+//! 先取视频页，读页面里的视频信息和流地址；页面里读不到的那一半再调不签名的接口
+//! （`view`、`playurl`）补上。`meta.json` 的 `stage` 记下两半各是从哪里取到的。
+//!
 //! 输出目录里的文件名都是固定的，不用网络上来的名字：
-//! `view.json`（`view` 接口的原始响应）、`meta.json`、`images/cover.<ext>`、
+//! `view.json`（视频信息的原始 JSON：页面那一路是 `__INITIAL_STATE__.videoData`，
+//! 接口那一路是 `view` 接口的整个响应）、`meta.json`、`images/cover.<ext>`、
 //! `media/video.m4s`、`media/audio.m4s`。
 
 use std::collections::BTreeSet;
@@ -18,6 +22,7 @@ use usuyo_plugin_kit::protocol::{
 
 use crate::api::{ApiError, Bilibili, step};
 use crate::canonical::{identity, locate};
+use crate::ids::VideoRef;
 
 /// 本插件能给的输出，和清单里的 `outputs` 一致。
 pub const OUTPUTS: [OutputKind; 5] = [
@@ -127,9 +132,16 @@ pub fn fetch(
     let identity = identity(&video)?;
 
     let fetched_at = Rfc3339::from_timestamp(jiff::Timestamp::now());
-    step("视频信息");
-    let reply = api.get("x/web-interface/view", &[("bvid", video.bvid.as_str())])?;
-    let view: View = reply.data()?;
+    step("视频页");
+    let from_page = video_page(api, &video)?;
+    let (view, view_raw, view_from) = match from_page.view {
+        Some((view, raw)) => (view, raw, PAGE),
+        None => {
+            step("视频信息");
+            let reply = api.get("x/web-interface/view", &[("bvid", video.bvid.as_str())])?;
+            (reply.data()?, reply.raw, API)
+        }
+    };
     if view.bvid != video.bvid {
         return Err(CallFailure::new(
             ErrorCode::UpstreamChanged,
@@ -146,7 +158,7 @@ pub fn fetch(
                 format!("the video has no part {}", video.page),
             )
         })?;
-    write(out, "view.json", &reply.raw)?;
+    write(out, "view.json", &view_raw)?;
 
     let mut reasons: Vec<String> = Vec::new();
     let mut meta = json!({
@@ -156,6 +168,7 @@ pub fn fetch(
         "page": page.page,
         "pageCount": view.pages.len(),
         "part": page.part,
+        "stage": {"view": view_from},
     });
 
     let description = view.desc.trim();
@@ -226,8 +239,17 @@ pub fn fetch(
 
     let want_video = wanted.contains(&OutputKind::Video);
     if wanted.contains(&OutputKind::Audio) {
-        match streams(api, out, &view, page, want_video, &mut output, &mut absent) {
-            Ok(streams_meta) => meta["streams"] = streams_meta,
+        let (play, streams_from) = match from_page.play {
+            Some(play) => (Ok(play), PAGE),
+            None => (playurl(api, &view, page), API),
+        };
+        match play
+            .and_then(|play| streams(api, out, play, page, want_video, &mut output, &mut absent))
+        {
+            Ok(streams_meta) => {
+                meta["streams"] = streams_meta;
+                meta["stage"]["streams"] = streams_from.into();
+            }
             Err(e) => reasons.push(soft(e, "音视频流")?),
         }
     }
@@ -300,19 +322,91 @@ fn cover(api: &Bilibili, out: &Path, pic: &str) -> Result<RelPath, ApiError> {
     RelPath::try_from(name).map_err(ApiError::Shape)
 }
 
-/// 取低画质的 DASH 流：视频和音频是两个文件，这里不合并（合并由宿主的转换步骤做）。
-/// 两个都存了时带同一个 `group`（`cid:<cid>`），宿主据此知道它们是同一段的画面和音轨。
-/// 视频没要时只写音频。playurl 的 DASH 里没有视频流或没有音频流的，记进 `absent`
-/// （这个视频本来没有，不算缺）。返回写进 `meta.json` 的说明。
-fn streams(
-    api: &Bilibili,
-    out: &Path,
-    view: &View,
-    page: &Page,
-    want_video: bool,
-    output: &mut FetchOutput,
-    absent: &mut BTreeSet<OutputKind>,
-) -> Result<Value, ApiError> {
+/// `meta.json` 的 `stage` 里写的两种来处：视频页，或不签名的接口。
+const PAGE: &str = "video-page";
+const API: &str = "api";
+
+/// 视频页里读到的两半：视频信息（`__INITIAL_STATE__.videoData`，和 `view` 接口的 `data`
+/// 同样的字段，带着它的原始 JSON）和流地址（`__playinfo__.data`，和 playurl 的 `data` 同样的字段，
+/// 只在有 DASH 时算读到）。读不到的那一半是 `None`，由接口补。
+struct FromPage {
+    view: Option<(View, Vec<u8>)>,
+    play: Option<Play>,
+}
+
+/// 照 yt-dlp `yt_dlp/extractor/bilibili.py` 的 `BiliBiliIE._real_extract`（723-753、829-834 行）的先后：
+/// 不带 cookie 取视频页（分 P 带 `?p=N`），读 `window.__INITIAL_STATE__` 和 `window.__playinfo__`。
+/// 页面带 `window._riskdata_` 的 `v_voucher` 是风控的验证要求，回 `blocked`（照 api.rs 里接口带
+/// `v_voucher` 的认法记成 -352）。页面取不到（跳走、404、太大）时两半都是 `None`；
+/// 网络、风控、限流这些要停下来的照原样报出。
+fn video_page(api: &Bilibili, video: &VideoRef) -> Result<FromPage, ApiError> {
+    let path = format!("video/{}/", video.bvid);
+    let part = video.page.to_string();
+    let query: &[(&str, &str)] = if video.page > 1 {
+        &[("p", part.as_str())]
+    } else {
+        &[]
+    };
+    let body = match api.page(&path, query) {
+        Ok(body) => body,
+        Err(e) if !e.is_hard() => {
+            return Ok(FromPage {
+                view: None,
+                play: None,
+            });
+        }
+        Err(e) => return Err(e),
+    };
+    let html = String::from_utf8_lossy(&body);
+    if script_json(&html, "_riskdata_").is_some_and(|risk| !risk["v_voucher"].is_null()) {
+        return Err(ApiError::Code {
+            code: -352,
+            message: "risk control on the video page".into(),
+        }
+        .answered(&body));
+    }
+    let view = match script_json(&html, "__INITIAL_STATE__")
+        .as_ref()
+        .and_then(|state| state.get("videoData"))
+    {
+        Some(data) => match View::deserialize(data) {
+            Ok(view) => Some((
+                view,
+                serde_json::to_vec_pretty(data)
+                    .map_err(|e| ApiError::Shape(format!("videoData: {e}")))?,
+            )),
+            Err(_) => None,
+        },
+        None => None,
+    };
+    let play = script_json(&html, "__playinfo__")
+        .as_ref()
+        .and_then(|info| info.get("data"))
+        .and_then(|data| Play::deserialize(data).ok())
+        .filter(|play| play.dash.is_some());
+    Ok(FromPage { view, play })
+}
+
+/// 页面脚本里 `window.<name> =` 后面的那一个 JSON 值（照 yt-dlp `_search_json` 的读法：
+/// 只读到这个值结束，后面的脚本不管）。没有、或读不出是 `None`：这一半改由接口取。
+fn script_json(html: &str, name: &str) -> Option<Value> {
+    let marker = format!("window.{name}");
+    let mut rest = html;
+    while let Some(at) = rest.find(&marker) {
+        rest = &rest[at + marker.len()..];
+        let Some(value) = rest.trim_start().strip_prefix('=') else {
+            continue;
+        };
+        return serde_json::Deserializer::from_str(value.trim_start())
+            .into_iter::<Value>()
+            .next()?
+            .ok();
+    }
+    None
+}
+
+/// 页面里没有流地址时调不签名的 playurl。
+fn playurl(api: &Bilibili, view: &View, page: &Page) -> Result<Play, ApiError> {
     let aid = view.aid.to_string();
     let cid = page.cid.to_string();
     step("音视频流地址");
@@ -330,7 +424,22 @@ fn streams(
             ("fourk", "1"),
         ],
     )?;
-    let play: Play = reply.data()?;
+    reply.data()
+}
+
+/// 取低画质的 DASH 流：视频和音频是两个文件，这里不合并（合并由宿主的转换步骤做）。
+/// 两个都存了时带同一个 `group`（`cid:<cid>`），宿主据此知道它们是同一段的画面和音轨。
+/// 视频没要时只写音频。DASH 里没有视频流或没有音频流的，记进 `absent`
+/// （这个视频本来没有，不算缺）。返回写进 `meta.json` 的说明。
+fn streams(
+    api: &Bilibili,
+    out: &Path,
+    play: Play,
+    page: &Page,
+    want_video: bool,
+    output: &mut FetchOutput,
+    absent: &mut BTreeSet<OutputKind>,
+) -> Result<Value, ApiError> {
     let dash = play.dash.ok_or_else(|| {
         ApiError::Shape(
             "playurl gave no DASH streams (an old video may only have a muxed FLV)".into(),

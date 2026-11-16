@@ -18,6 +18,9 @@ sites:
     cookies: [SESSDATA]
     domains: [".bilibili.com"]
 methods:
+  # 照 yt-dlp（yt_dlp/extractor/bilibili.py 的 BiliBiliIE._real_extract）的先后：先不带 cookie 取视频页，
+  # 读页面里的 __INITIAL_STATE__（视频信息）和 __playinfo__（流）；页面带 _riskdata_ 的 v_voucher 时回 blocked；
+  # 页面里读不到的那一半再调不签名的 view、playurl 接口补上，也不带 cookie。都不签名。
   - id: view
     name: 公开接口
     access: public-web

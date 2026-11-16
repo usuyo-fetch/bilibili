@@ -4,7 +4,7 @@ B站的获取插件，供 [usuyo](https://github.com/usuyo/usuyo) 调用：取�
 
 | 功能 | 实现方式（方法 id） | 账号 | 风险层级 | 状态 |
 |---|---|---|---|---|
-| 按链接取单条内容（元数据、封面、低画质音视频） | `view` | 不用 | `public-web`，默认开 | 已实现（2026-11-12 不带账号对真实 B站 跑过一次） |
+| 按链接取单条内容（元数据、封面、低画质音视频） | `view`：先取视频页，读不到的再调不签名的接口 | 不用 | `public-web`，默认开 | 已实现（只走接口的旧版 2026-11-12 不带账号对真实 B站 跑过一次；先取视频页这一路只对着本机假服务测过） |
 | 列出公开收藏夹 | `favorites-public` | 不用 | `public-web`，默认开 | 已实现（2026-11-12 不带账号对真实 B站 跑过一次） |
 | 列出我的收藏夹、稍后再看 | `favorites` | 在 usuyo 里登录的 B站 | `session-api`，默认开 | 已实现（对着本机假服务测过，没有对着真实 B站 跑过） |
 | 列出我的收藏夹、稍后再看 | `userscript` | 只在你的浏览器里 | `browser-session`，默认开 | 已实现（脚本测试对着手写样例，没有在真浏览器里跑过） |
@@ -13,7 +13,9 @@ B站的获取插件，供 [usuyo](https://github.com/usuyo/usuyo) 调用：取�
 
 ### `view`
 
-`fetch`：元数据（`view`）、封面、按需要的低画质音视频流。不读凭据、不带 cookie，即使你登录过。当前以取到内容为先，不追画质；高清视频是试验性的，还没有实现。
+`fetch`：元数据、封面、按需要的低画质音视频流。不读凭据、不带 cookie，即使你登录过；不签名。当前以取到内容为先，不追画质；高清视频是试验性的，还没有实现。
+
+照 yt-dlp 的先后，先取视频页 `www.bilibili.com/video/<BV 号>/`（分 P 带 `?p=N`），读页面里的 `window.__INITIAL_STATE__`（视频信息）和 `window.__playinfo__`（流地址）。页面带 `window._riskdata_` 的 `v_voucher`、或回 412 时回 `blocked`，不再调接口。页面跳走、404、或读不到其中一半时，那一半调接口补：视频信息调 `x/web-interface/view`，流地址调 `x/player/playurl`。`meta.json` 的 `stage` 记下两半各从哪里来（`video-page` 或 `api`）；`view.json` 在页面那一路是 `videoData`，在接口那一路是 `view` 接口的整个响应。
 
 ### `favorites-public`
 
@@ -36,11 +38,11 @@ B站的获取插件，供 [usuyo](https://github.com/usuyo/usuyo) 调用：取�
 
 ## 测试
 
-`cargo test`，对着本机假服务；`view.json` 是一次真实响应，其余样例手写。
+`cargo test`，对着本机假服务；`view.json` 是一次真实响应，其余样例手写（视频页在 `tests/api.rs` 里拼，只有 yt-dlp 读的那几段脚本）。
 
 ## 参考的项目
 
-接口字段名参考了 bili-sync（MIT），接口参数参考了 yutto 的做法；没有调用它们，也没有移植它们的代码。许可证：MIT。
+接口字段名参考了 bili-sync（MIT），接口参数参考了 yutto 的做法；先取视频页、读哪几段脚本照 yt-dlp（Unlicense）`yt_dlp/extractor/bilibili.py` 的 `BiliBiliIE._real_extract`；没有调用它们，也没有移植它们的代码。许可证：MIT。
 
 ## 开发
 

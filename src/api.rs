@@ -1,5 +1,5 @@
 //! B站的 HTTP 接口：只调不需要签名的接口。cookie 只发给 API 主机；
-//! 展开短链、下封面和视频流的请求一律不带 cookie。网络上来的每个字节都不可信。
+//! 取视频页、展开短链、下封面和视频流的请求一律不带 cookie。网络上来的每个字节都不可信。
 //! 请求都经 `usuyo_plugin_kit::http`：每种请求只连自己那几台主机，只连公网地址，都不跟跳转。
 
 use std::io::{Read, Write};
@@ -25,6 +25,9 @@ const REFERER: &str = "https://www.bilibili.com/";
 /// API 响应上限。
 const API_BYTES: u64 = 8 << 20;
 const API_TIMEOUT: Duration = Duration::from_secs(20);
+/// 视频页响应上限：页面里带着视频信息和流地址两段 JSON。
+const PAGE_BYTES: u64 = 8 << 20;
+const PAGE_TIMEOUT: Duration = Duration::from_secs(20);
 /// 整次调用的总时限，比清单里的 `timeout: 30m` 短，留出交回已取到部分的时间。
 const CALL_BUDGET: Duration = Duration::from_secs(28 * 60);
 const SHORT_LINK_TIMEOUT: Duration = Duration::from_secs(8);
@@ -102,7 +105,7 @@ impl ApiError {
         }
     }
 
-    fn answered(self, raw: &[u8]) -> ApiError {
+    pub(crate) fn answered(self, raw: &[u8]) -> ApiError {
         let end = raw.len().min(ANSWER_BYTES as usize);
         ApiError::Answered {
             error: Box::new(self),
@@ -189,6 +192,8 @@ fn not_found(message: String, reason: NotFoundReason) -> CallFailure {
 #[derive(Debug, Clone)]
 pub struct Endpoints {
     api_base: Url,
+    /// 视频页的主机（`www.bilibili.com`）。
+    page_base: Url,
     /// 测试用的本机主机：算短链主机，也算允许的媒体主机，媒体链接不升级成 https。
     local_host: Option<String>,
     policy: Policy,
@@ -198,16 +203,19 @@ impl Endpoints {
     pub fn production() -> Self {
         Self {
             api_base: Url::parse("https://api.bilibili.com/").expect("constant URL"),
+            page_base: Url::parse("https://www.bilibili.com/").expect("constant URL"),
             local_host: None,
             policy: Policy::from_host(),
         }
     }
 
     /// 测试用：`base` 是 `http://127.0.0.1:<端口>`，`policy` 让这个本机地址算公网。
+    /// 接口和视频页都指到这一台。
     pub fn local(base: &str, policy: Policy) -> Self {
         let api_base = Url::parse(base).expect("local base URL");
         let local_host = api_base.host_str().map(str::to_owned);
         Self {
+            page_base: api_base.clone(),
             api_base,
             local_host,
             policy,
@@ -238,6 +246,11 @@ impl Endpoints {
     /// 接口只连 API 主机。
     fn api_client(&self) -> Client {
         self.client(&[self.api_host()])
+    }
+
+    /// 视频页只连页面主机。
+    fn page_client(&self) -> Client {
+        self.client(&[self.page_base.host_str().unwrap_or_default()])
     }
 
     fn short_link_client(&self) -> Client {
@@ -438,6 +451,39 @@ impl Bilibili {
             data: wire.data,
             raw,
         })
+    }
+
+    /// 取页面主机上的一页，回页面的字节。不带 cookie（yt-dlp 取视频页也不带）。
+    /// 跳转不跟：跳走了当这一页没给内容（`Shape`），调用方改用接口。
+    pub fn page(&self, path: &str, query: &[(&str, &str)]) -> Result<Vec<u8>, ApiError> {
+        let mut url = self
+            .endpoints
+            .page_base
+            .join(path)
+            .map_err(|e| ApiError::Shape(format!("bad page `{path}`: {e}")))?;
+        if !query.is_empty() {
+            url.query_pairs_mut().extend_pairs(query);
+        }
+        let mut response = self
+            .endpoints
+            .page_client()
+            .get(&url)
+            .header("Accept", "text/html")
+            .timeout(self.step_timeout(PAGE_TIMEOUT)?)
+            .send()
+            .map_err(|e| self.out_of_time(transport(e)))?;
+        let status = response.status();
+        if (300..400).contains(&status) {
+            return Err(ApiError::Shape(format!(
+                "the video page redirected (HTTP {status})"
+            )));
+        }
+        if let Err(e) = check_status(&response) {
+            // 状态不对时也留下回答的开头；读不出来就只报状态
+            let head = response.read_to_vec(ANSWER_BYTES).unwrap_or_default();
+            return Err(e.answered(&head));
+        }
+        read_limited(&mut response, PAGE_BYTES).map_err(|e| self.out_of_time(e))
     }
 
     fn open_media(&self, url: &Url, timeout: Duration) -> Result<http::Response, ApiError> {
